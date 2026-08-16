@@ -46,6 +46,11 @@ specs specifically.
     base_url: "https://api.petstore.example.com/v1"
   )
 
+# The API name becomes a JavaScript identifier inside the sandbox
+# (`apis.petstore`, `specs.petstore`, `context.petstore`), so it must match
+# /^[A-Za-z_][A-Za-z0-9_]*$/ — "my-api" and "2fast" are rejected with
+# {:error, {:invalid_api_name, name}}.
+
 # 3. Get the tool definitions.
 tools =
   OapiCodemode.tools(

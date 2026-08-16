@@ -7,7 +7,7 @@ defmodule OapiCodemode.Tools.DescriptionsTest do
     reg = start_supervised!({Registry, name: nil})
     {:ok, art} = Ingest.ingest(Fixtures.clean_3_1())
     :ok = Registry.register(reg, "petstore", art, %ApiConfig{context: %{"storeId" => "s1"}})
-    %{reg: reg}
+    %{reg: reg, art: art}
   end
 
   test "search description lists APIs, tags, spec shape types, and examples", %{reg: reg} do
@@ -34,7 +34,27 @@ defmodule OapiCodemode.Tools.DescriptionsTest do
     assert desc =~ "status"
   end
 
-  test "tag vocabularies are truncated past the limit", %{reg: reg} do
+  # T-I2: the sandbox really receives `context` and `apiNames` globals, but
+  # the description only named them in prose. Declare them like `apis`, and
+  # show the real path the LLM must type — not a placeholder.
+  test "execute description declares the context and apiNames globals", %{reg: reg} do
+    desc = Descriptions.execute(Registry.list(reg))
+
+    assert desc =~ "declare const context: Record<string, Record<string, unknown>>;"
+    assert desc =~ "declare const apiNames: string[];"
+    assert desc =~ "context.petstore.storeId"
+  end
+
+  test "execute description omits the context global when no API declares one", %{art: art} do
+    reg = start_supervised!({Registry, name: nil}, id: :no_ctx_reg)
+    :ok = Registry.register(reg, "plain", art, %ApiConfig{})
+
+    desc = Descriptions.execute(Registry.list(reg))
+    refute desc =~ "declare const context"
+    assert desc =~ "declare const apiNames: string[];"
+  end
+
+  test "tag vocabularies are truncated past the limit", %{} do
     {:ok, art} = Ingest.ingest(Fixtures.clean_3_1())
     many_tags = %{art | tags: Enum.map(1..100, &"tag#{&1}")}
     reg2 = start_supervised!({Registry, name: nil}, id: :reg2)

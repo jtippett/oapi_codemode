@@ -23,10 +23,27 @@ defmodule OapiCodemode.Registry do
     GenServer.start_link(__MODULE__, opts, gen_opts)
   end
 
+  # The api name is used verbatim as a JS identifier inside the sandbox:
+  # `apis.<name>.request()`, `specs.<name>`, `context.<name>`. `$` is legal
+  # in a JS identifier but pointless here, so keep the alphabet boring.
+  @api_name_re ~r/^[A-Za-z_][A-Za-z0-9_]*$/
+
+  @doc """
+  Register an ingested artifact under `api_name`.
+
+  `api_name` must be a valid JS identifier — it becomes a property name on
+  the sandbox globals. Returns `{:error, {:invalid_api_name, name}}`
+  otherwise, or `{:error, :no_base_url}` when neither the config nor the
+  spec supplies a server URL.
+  """
   @spec register(GenServer.server(), String.t(), Artifact.t(), ApiConfig.t()) ::
-          :ok | {:error, term()}
+          :ok | {:error, {:invalid_api_name, term()} | :no_base_url}
   def register(server, api_name, %Artifact{} = artifact, %ApiConfig{} = config) do
-    GenServer.call(server, {:register, api_name, artifact, config})
+    if is_binary(api_name) and Regex.match?(@api_name_re, api_name) do
+      GenServer.call(server, {:register, api_name, artifact, config})
+    else
+      {:error, {:invalid_api_name, api_name}}
+    end
   end
 
   @spec lookup(GenServer.server(), String.t()) :: {:ok, %Entry{}} | {:error, :unknown_api}

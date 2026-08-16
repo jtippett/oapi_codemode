@@ -3,6 +3,9 @@ defmodule OapiCodemode.Executor.Mock do
   Test executor: the "sandbox" is an Elixir function you set per test.
   Exercises the plumbing (globals in, callbacks out, results back) without
   a JS runtime.
+
+  M7: this ships in `lib/`, not `test/support/`, on purpose — downstream
+  hosts need it to test their own tool wiring without installing Deno.
   """
 
   @behaviour OapiCodemode.Executor

@@ -10,7 +10,11 @@ defmodule OapiCodemode.Executor do
     * `callbacks.request` may be invoked CONCURRENTLY (Promise.all).
     * The boundary is JSON-native: values crossing it survive
       JSON encode/decode unchanged.
-    * On timeout, return `{:error, {:timeout, ms}}`.
+    * On timeout, return `{:error, {:timeout, ms}}`, and cancel any
+      outstanding callback work first — killing the sandbox process is not
+      enough on its own, since callbacks dispatched into Elixir Tasks can
+      still be in flight and will try to write to a call log the tool layer
+      has already torn down.
   """
 
   @type env :: %{globals: map(), callbacks: %{optional(:request) => fun()}}

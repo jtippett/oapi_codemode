@@ -1,8 +1,15 @@
 defmodule OapiCodemode.Tools.Descriptions do
-  @moduledoc "Assembles search/execute tool descriptions from registry state. The description IS the documentation."
+  @moduledoc """
+  Assembles search/execute tool descriptions from registry state. The
+  description IS the documentation — every global the sandbox actually
+  receives must be declared here, with real names, or the model has to
+  guess at them.
+  """
 
   @max_tags 40
 
+  @doc "Description for the `search_apis` tool, given `Registry.list/1` output."
+  @spec search([{String.t(), struct()}]) :: String.t()
   def search(entries) do
     """
     Search the OpenAPI specs of the registered APIs by running JavaScript
@@ -52,6 +59,8 @@ defmodule OapiCodemode.Tools.Descriptions do
     """
   end
 
+  @doc "Description for the `execute_api_code` tool, given `Registry.list/1` output."
+  @spec execute([{String.t(), struct()}]) :: String.t()
   def execute(entries) do
     """
     Execute JavaScript that calls the registered APIs. First use the search
@@ -71,7 +80,8 @@ defmodule OapiCodemode.Tools.Descriptions do
     interface Response { status: number; headers: Record<string, string>; body: unknown; }
 
     declare const apis: Record<string, { request(opts: RequestOptions): Promise<Response> }>;
-
+    declare const apiNames: string[];   // names of the registered APIs, same keys as `apis`
+    #{context_declaration(entries)}
     Available: #{Enum.map_join(entries, ", ", fn {name, _} -> "apis.#{name}" end)}
     #{context_globals(entries)}
 
@@ -98,12 +108,30 @@ defmodule OapiCodemode.Tools.Descriptions do
 
   defp tags(tags), do: Enum.join(tags, ", ")
 
+  # Only declared when some API actually has context — an empty `context`
+  # global is not injected, so declaring it would be a lie.
+  defp context_declaration(entries) do
+    if Enum.any?(entries, fn {_, e} -> map_size(e.config.context) > 0 end) do
+      "declare const context: Record<string, Record<string, unknown>>;"
+    else
+      ""
+    end
+  end
+
+  # Spell out the real access paths (context.<api>.<key>) with the values
+  # the host registered — a model shown only a JSON blob tends to invent
+  # `context.storeId` and get `undefined`.
   defp context_globals(entries) do
     lines =
-      for {name, entry} <- entries, map_size(entry.config.context) > 0 do
-        "Context globals for #{name}: #{Jason.encode!(entry.config.context)}"
+      for {name, entry} <- entries,
+          map_size(entry.config.context) > 0,
+          {key, value} <- Enum.sort(entry.config.context) do
+        "  context.#{name}.#{key} = #{Jason.encode!(value)}"
       end
 
-    Enum.join(lines, "\n")
+    case lines do
+      [] -> ""
+      lines -> "Host-provided context values:\n" <> Enum.join(lines, "\n")
+    end
   end
 end

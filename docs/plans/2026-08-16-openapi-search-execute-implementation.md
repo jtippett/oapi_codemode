@@ -3018,3 +3018,45 @@ Host glue modules (gentility `CloudLoop.Tool` wrapper, ele `UserMCP.Tool` wrappe
 | 16 | Facade + README | public API |
 | 17–18 | Deno executor | real sandbox: protocol, concurrency, timeout, no-network |
 | 19 | Integration | LLM-shaped JS through the whole stack |
+
+---
+
+## Addendum (post-execution, 2026-08-16): plan-code corrections
+
+This plan was executed in full. Code review found defects **in the plan's own
+code samples**; the committed implementation supersedes the plan text wherever
+they differ. Do not re-execute tasks from this file without these corrections:
+
+- **Task 5**: `extract_body`'s `List.first(content)` is invalid on a map — use
+  `Enum.at(content, 0, {nil, %{}})`. Parameter merge must apply
+  operation-over-path-level **override by (name, in)**, not concatenation.
+- **Task 4**: dereferencing requires **memoization** (cache only expansions
+  containing no `$circular` marker) — unmemoized inlining is exponential on
+  shared-schema fan-out.
+- **Task 9–11**: enum checks must **coerce before comparing**; `Query.encode`
+  returns `{:ok, _} | {:error, _}` and must **sort by name only** (stable) —
+  the plan's bare `Enum.sort()` scrambles array element order; matcher must
+  sort candidates by **specificity**, not rely on caller list order;
+  credentials `attach` must guard non-tuple credentials (the plan's fallback
+  **leaks the secret via the `elem/2` crash trace**) and downcase HTTP scheme
+  names.
+- **Task 12**: never interpolate transport exceptions or resolver error
+  reasons into model-visible messages (Mint errors **embed credential
+  values**); reject LLM query keys colliding with auth query params
+  (credential substitution); cap bodies by **bytes** with UTF-8 boundary
+  trim; base64-envelope non-UTF-8 bodies; headers return a **map**;
+  `redirect: false` by default; path segments encode with
+  `URI.encode(&URI.char_unreserved?/1)`, not `encode_www_form`.
+- **Task 15**: wrap the call-metadata Agent in `try/after` with unlinked
+  `Agent.start` (the plan's version leaks a linked process per failed call);
+  `Result.encode` budgets **bytes**, not codepoints, and must not raise on
+  unencodable values; `Registry.register` validates API names as JS
+  identifiers; the execute description must document the `context` and
+  `apiNames` globals explicitly.
+- **Task 17**: vendor the stdin line-splitter (no `jsr:` import — zero
+  runtime network); make protocol writes **synchronous** (`writeSync`) so
+  `Deno.exit` cannot race the final flush; lock `Deno.stdout` against
+  protocol injection by sandboxed code.
+
+Deferred, tracked: search-globals encode caching (~4MB / ~122ms per search
+call with the X fixture registered).

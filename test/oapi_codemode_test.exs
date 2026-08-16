@@ -12,6 +12,26 @@ defmodule OapiCodemodeTest do
     assert {:ok, _} = OapiCodemode.Registry.lookup(reg, "petstore")
   end
 
+  test "register/4 registers a pre-ingested artifact without re-parsing" do
+    {:ok, registry} = OapiCodemode.Registry.start_link(name: nil)
+    {:ok, artifact} = OapiCodemode.ingest(OapiCodemode.Fixtures.petstore_json())
+
+    assert :ok =
+             OapiCodemode.register(registry, "petstore", artifact,
+               base_url: "https://api.example.com"
+             )
+
+    assert {:ok, _entry} = OapiCodemode.Registry.lookup(registry, "petstore")
+  end
+
+  test "register/4 rejects unknown config options" do
+    {:ok, registry} = OapiCodemode.Registry.start_link(name: nil)
+    {:ok, artifact} = OapiCodemode.ingest(OapiCodemode.Fixtures.petstore_json())
+
+    assert {:error, {:invalid_config_option, :base_urll}} =
+             OapiCodemode.register(registry, "petstore", artifact, base_urll: "x")
+  end
+
   # A typo'd config key (e.g. `bas_url` instead of `base_url`) used to raise
   # a KeyError out of struct!/2 straight into the caller — a host wiring up
   # config from user input gets a crash instead of a value it can act on.

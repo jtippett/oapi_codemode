@@ -12,6 +12,20 @@ defmodule OapiCodemode do
 
   alias OapiCodemode.{ApiConfig, Ingest, Registry, Tools}
 
+  @doc "Ingest a raw spec into an `%Artifact{}` for caching. See `register/4`."
+  defdelegate ingest(raw_spec), to: Ingest
+
+  @doc """
+  Register a pre-ingested artifact. Hosts that cache `%Artifact{}`s (ingest is
+  pure) use this to skip re-parsing; `ingest_and_register/4` remains the
+  one-shot path.
+  """
+  def register(registry, name, %OapiCodemode.Artifact{} = artifact, config_opts \\ []) do
+    with {:ok, config} <- build_config(config_opts) do
+      Registry.register(registry, name, artifact, config)
+    end
+  end
+
   @doc """
   Ingest a raw spec and register it in one call.
 
@@ -21,9 +35,8 @@ defmodule OapiCodemode do
   value it can act on instead of a `KeyError` crash.
   """
   def ingest_and_register(registry, name, raw_spec, config_opts \\ []) do
-    with {:ok, config} <- build_config(config_opts),
-         {:ok, artifact} <- Ingest.ingest(raw_spec) do
-      Registry.register(registry, name, artifact, config)
+    with {:ok, artifact} <- ingest(raw_spec) do
+      register(registry, name, artifact, config_opts)
     end
   end
 

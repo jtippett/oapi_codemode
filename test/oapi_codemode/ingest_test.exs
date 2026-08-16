@@ -26,4 +26,14 @@ defmodule OapiCodemode.IngestTest do
     {:ok, art} = Ingest.ingest(Fixtures.dirty_3_0())
     assert art.security_schemes["keyAuth"]["type"] == "apiKey"
   end
+
+  test "tolerates a non-map info field (list) instead of raising" do
+    assert {:ok, %Artifact{}} =
+             Ingest.ingest(~s({"openapi":"3.1.0","paths":{},"info":[]}))
+  end
+
+  test "tolerates a non-map info field (string) instead of raising" do
+    assert {:ok, %Artifact{}} =
+             Ingest.ingest(~s({"openapi":"3.1.0","paths":{},"info":"oops"}))
+  end
 end

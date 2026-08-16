@@ -18,7 +18,7 @@ defmodule OapiCodemode.Ingest do
        %Artifact{
          spec: sandbox_payload(deref),
          operations: operations,
-         title: get_in(deref, ["info", "title"]),
+         title: info_map(deref["info"])["title"],
          default_base_url: default_server(deref),
          tags: operations |> Enum.flat_map(& &1.tags) |> Enum.uniq() |> Enum.sort(),
          security_schemes: get_in(deref, ["components", "securitySchemes"]) || %{}
@@ -28,10 +28,15 @@ defmodule OapiCodemode.Ingest do
 
   defp sandbox_payload(deref) do
     %{
-      "info" => Map.take(deref["info"] || %{}, ["title", "description", "version"]),
+      "info" => Map.take(info_map(deref["info"]), ["title", "description", "version"]),
       "paths" => deref["paths"]
     }
   end
+
+  # Specs in the wild are dirty; tolerate a malformed (non-map) `info` field
+  # rather than rejecting the whole spec.
+  defp info_map(info) when is_map(info), do: info
+  defp info_map(_), do: %{}
 
   defp default_server(%{"servers" => [%{"url" => url} | _]}), do: url
   defp default_server(_), do: nil

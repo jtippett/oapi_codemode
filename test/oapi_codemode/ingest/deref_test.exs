@@ -38,4 +38,106 @@ defmodule OapiCodemode.Ingest.DerefTest do
     assert deref["junk"] == %{"$unresolved" => "#/components/schemas/Missing"}
     assert deref["external"] == %{"$unresolved" => "other.yaml#/Foo"}
   end
+
+  test "diamond/shared-schema refs fully inline identically on both branches (memoization correctness)" do
+    spec = %{
+      "openapi" => "3.1.0",
+      "paths" => %{
+        "/x" => %{
+          "get" => %{
+            "responses" => %{
+              "200" => %{
+                "content" => %{
+                  "application/json" => %{
+                    "schema" => %{
+                      "type" => "object",
+                      "properties" => %{
+                        "left" => %{"$ref" => "#/components/schemas/Shared"},
+                        "right" => %{"$ref" => "#/components/schemas/Shared"}
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "components" => %{
+        "schemas" => %{
+          "Shared" => %{
+            "type" => "object",
+            "properties" => %{
+              "leaf" => %{"type" => "string"}
+            }
+          }
+        }
+      }
+    }
+
+    deref = Deref.dereference(spec)
+
+    schema =
+      deref["paths"]["/x"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+
+    expected = %{"type" => "object", "properties" => %{"leaf" => %{"type" => "string"}}}
+    assert schema["properties"]["left"] == expected
+    assert schema["properties"]["right"] == expected
+  end
+
+  test "deep chain of shared-schema fan-out dereferences quickly (memoization performance guard)" do
+    depth = 20
+
+    schemas =
+      for level <- 0..depth, into: %{} do
+        name = "L#{level}"
+
+        body =
+          if level == depth do
+            %{"type" => "object", "properties" => %{"leaf" => %{"type" => "string"}}}
+          else
+            next_ref = %{"$ref" => "#/components/schemas/L#{level + 1}"}
+
+            %{
+              "type" => "object",
+              "properties" => %{
+                "a" => next_ref,
+                "b" => next_ref
+              }
+            }
+          end
+
+        {name, body}
+      end
+
+    spec = %{
+      "openapi" => "3.1.0",
+      "paths" => %{
+        "/x" => %{
+          "get" => %{
+            "responses" => %{
+              "200" => %{
+                "content" => %{
+                  "application/json" => %{
+                    "schema" => %{"$ref" => "#/components/schemas/L0"}
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "components" => %{"schemas" => schemas}
+    }
+
+    {elapsed_us, deref} = :timer.tc(fn -> Deref.dereference(spec) end)
+
+    schema =
+      deref["paths"]["/x"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+
+    # two levels in: still a fully inlined object, not a $ref
+    assert schema["properties"]["a"]["properties"]["b"]["type"] == "object"
+
+    assert elapsed_us < 500_000
+  end
 end

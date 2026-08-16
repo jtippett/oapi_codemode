@@ -23,4 +23,22 @@ defmodule OapiCodemode.Ingest.ParserTest do
   test "rejects unparseable input" do
     assert {:error, {:parse_error, _}} = Parser.parse("{{{{not anything")
   end
+
+  test "canonicalizes unquoted YAML numeric map keys to strings" do
+    yaml = """
+    openapi: "3.0.3"
+    paths:
+      /x:
+        get:
+          responses:
+            200:
+              description: ok
+    """
+
+    assert {:ok, doc} = Parser.parse(yaml)
+    responses = doc["paths"]["/x"]["get"]["responses"]
+    assert Map.has_key?(responses, "200")
+    refute Map.has_key?(responses, 200)
+    assert responses["200"]["description"] == "ok"
+  end
 end

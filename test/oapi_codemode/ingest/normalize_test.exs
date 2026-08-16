@@ -38,6 +38,32 @@ defmodule OapiCodemode.Ingest.NormalizeTest do
     assert Enum.any?(list.parameters, &(&1["name"] == "limit" and &1["required"]))
   end
 
+  test "operation-level parameter overrides a path-level parameter with the same name+in" do
+    spec = %{
+      "openapi" => "3.1.0",
+      "paths" => %{
+        "/things/{id}" => %{
+          "parameters" => [
+            %{"name" => "id", "in" => "path", "schema" => %{"type" => "string"}}
+          ],
+          "get" => %{
+            "parameters" => [
+              %{"name" => "id", "in" => "path", "schema" => %{"type" => "integer"}}
+            ],
+            "responses" => %{}
+          }
+        }
+      }
+    }
+
+    ops = Normalize.operations(spec)
+    [op] = ops
+    id_params = Enum.filter(op.parameters, &(&1["name"] == "id" and &1["in"] == "path"))
+
+    assert length(id_params) == 1
+    assert hd(id_params)["schema"]["type"] == "integer"
+  end
+
   test "deduplicates colliding ids with a numeric suffix" do
     spec = %{
       "openapi" => "3.1.0",

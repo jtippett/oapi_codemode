@@ -18,11 +18,22 @@ defmodule OapiCodemode.Ingest.Parser do
       end
     else
       case YamlElixir.read_from_string(raw) do
-        {:ok, doc} -> {:ok, doc}
+        {:ok, doc} -> {:ok, stringify_keys(doc)}
         {:error, err} -> {:error, {:parse_error, inspect(err)}}
       end
     end
   end
+
+  # YAML permits unquoted scalar map keys (e.g. `200:`), which the YAML
+  # library decodes as non-string terms (integers, atoms, booleans). Force
+  # every map key to a string so downstream code can treat JSON- and
+  # YAML-sourced specs identically.
+  defp stringify_keys(map) when is_map(map) do
+    Map.new(map, fn {k, v} -> {to_string(k), stringify_keys(v)} end)
+  end
+
+  defp stringify_keys(list) when is_list(list), do: Enum.map(list, &stringify_keys/1)
+  defp stringify_keys(other), do: other
 
   defp validate(%{"openapi" => "3" <> _, "paths" => paths} = doc) when is_map(paths),
     do: {:ok, doc}

@@ -29,7 +29,7 @@ defmodule OapiCodemode.Ingest.Normalize do
         segments: parse_segments(path),
         summary: op["summary"] || op["description"],
         tags: op["tags"] || [],
-        parameters: path_level_params ++ Map.get(op, "parameters", []),
+        parameters: merge_parameters(path_level_params, Map.get(op, "parameters", [])),
         request_body: extract_body(op["requestBody"]),
         security: op["security"] || spec["security"]
       }
@@ -37,6 +37,22 @@ defmodule OapiCodemode.Ingest.Normalize do
   end
 
   defp path_operations(_path, _item, _spec), do: []
+
+  # OpenAPI 3.x semantics: an operation-level parameter with the same
+  # (name, in) pair overrides the path-level parameter rather than
+  # duplicating it. Path-level params without an override are kept in their
+  # original order, followed by all operation-level params (overrides in
+  # their operation-level position, plus any operation-only additions).
+  defp merge_parameters(path_level_params, op_params) do
+    op_keys = MapSet.new(op_params, &param_key/1)
+
+    kept_path_level =
+      Enum.reject(path_level_params, fn param -> MapSet.member?(op_keys, param_key(param)) end)
+
+    kept_path_level ++ op_params
+  end
+
+  defp param_key(param), do: {param["name"], param["in"]}
 
   defp derive_id(method, path) do
     suffix =

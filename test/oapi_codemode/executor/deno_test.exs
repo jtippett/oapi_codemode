@@ -14,7 +14,9 @@ defmodule OapiCodemode.Executor.DenoTest do
     assert {:ok, %{value: ["/x"]}} =
              Deno.run(
                "async () => Object.keys(specs.a.paths)",
-               %{globals: globals, callbacks: %{}}, timeout: 10_000)
+               %{globals: globals, callbacks: %{}},
+               timeout: 10_000
+             )
   end
 
   test "console output is captured as logs" do

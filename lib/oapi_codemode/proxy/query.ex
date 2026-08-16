@@ -65,12 +65,11 @@ defmodule OapiCodemode.Proxy.Query do
     object_form(name, value, param_spec)
   end
 
-  defp pairs({name, value, _param_spec}) do
-    case scalar(value) do
-      {:ok, s} -> {:ok, [{name, s, :form}]}
-      :error -> {:error, invalid(name, value)}
-    end
-  end
+  # By this clause, earlier heads (nil, [], list, map) have already ruled
+  # out everything scalar/1 would reject, so it always returns {:ok, _}
+  # here — matching on :error too used to trip a "clause will never match"
+  # compiler warning.
+  defp pairs({name, value, _param_spec}), do: {:ok, [{name, to_string(value), :form}]}
 
   defp array_form(name, value, param_spec) do
     if explode?(param_spec) do

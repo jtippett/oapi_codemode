@@ -1,7 +1,7 @@
 defmodule OapiCodemode.Ingest.NormalizeTest do
   use ExUnit.Case, async: true
   alias OapiCodemode.Ingest.{Parser, Deref, Normalize}
-  alias OapiCodemode.{Fixtures, Operation}
+  alias OapiCodemode.Fixtures
 
   defp operations(fixture) do
     {:ok, spec} = Parser.parse(fixture)

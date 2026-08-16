@@ -1,0 +1,49 @@
+openapi: 3.0.3
+info:
+  title: Dirty API
+  version: 0.0.1
+components:
+  securitySchemes:
+    keyAuth:
+      type: apiKey
+      in: query
+      name: api_key
+  schemas:
+    Node:
+      type: object
+      properties:
+        label:
+          type: string
+        parent:
+          $ref: '#/components/schemas/Node'
+security:
+  - keyAuth: []
+paths:
+  /nodes/{id}:
+    get:
+      summary: Fetch a node
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Node'
+  /nodes:
+    post:
+      summary: Create a node
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Node'
+      responses:
+        '201':
+          description: created

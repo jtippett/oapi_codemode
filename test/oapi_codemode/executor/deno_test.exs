@@ -38,4 +38,134 @@ defmodule OapiCodemode.Executor.DenoTest do
     assert {:error, _} =
              Deno.run("async () => {{{", %{globals: %{}, callbacks: %{}}, timeout: 10_000)
   end
+
+  test "round-trips a ~1MB globals payload intact" do
+    # Real specs' globals payload can be multi-MB (a real spec's globals
+    # measure ~4MB) — nothing in the protocol may assume short lines.
+    item = "item-" <> String.duplicate("x", 40)
+    big_list = for i <- 1..20_000, do: item <> "-#{i}"
+    globals = %{"bigList" => big_list}
+
+    approx_bytes = big_list |> Enum.map(&byte_size/1) |> Enum.sum()
+    assert approx_bytes > 1_000_000
+
+    {elapsed_us, result} =
+      :timer.tc(fn ->
+        Deno.run(
+          "async () => ({ length: bigList.length, last: bigList[bigList.length - 1] })",
+          %{globals: globals, callbacks: %{}},
+          timeout: 10_000
+        )
+      end)
+
+    assert {:ok, %{value: %{"length" => 20_000, "last" => last}}} = result
+    assert last == List.last(big_list)
+
+    IO.puts("1MB globals round-trip: #{Float.round(elapsed_us / 1000, 1)} ms")
+  end
+
+  test "request callback round-trips" do
+    callback = fn "petstore", %{"path" => "/pets"} -> %{"status" => 200, "body" => %{"n" => 1}} end
+
+    code = ~s|async () => { const r = await apis.petstore.request({ path: "/pets" }); return r.body.n; }|
+
+    assert {:ok, %{value: 1}} =
+             Deno.run(
+               code,
+               %{globals: %{"apiNames" => ["petstore"]}, callbacks: %{request: callback}},
+               timeout: 10_000
+             )
+  end
+
+  test "concurrent callbacks via Promise.all" do
+    test_pid = self()
+
+    callback = fn "a", %{"path" => path} ->
+      send(test_pid, {:called, path})
+      Process.sleep(300)
+      %{"path" => path}
+    end
+
+    code = ~s|async () => {
+      const [x, y] = await Promise.all([
+        apis.a.request({ path: "/one" }),
+        apis.a.request({ path: "/two" })
+      ]);
+      return [x.path, y.path];
+    }|
+
+    started = System.monotonic_time(:millisecond)
+
+    assert {:ok, %{value: ["/one", "/two"]}} =
+             Deno.run(code, %{globals: %{"apiNames" => ["a"]}, callbacks: %{request: callback}},
+               timeout: 10_000
+             )
+
+    elapsed = System.monotonic_time(:millisecond) - started
+    # Concurrent, not serial: two 300ms callbacks well under 600ms total.
+    assert elapsed < 550
+    assert_received {:called, "/one"}
+    assert_received {:called, "/two"}
+  end
+
+  test "callback errors become JS exceptions the code can catch" do
+    callback = fn _, _ -> raise "credential resolution failed" end
+
+    code = ~s|async () => { try { await apis.a.request({ path: "/x" }); return "no"; } catch (e) { return e.message; } }|
+
+    assert {:ok, %{value: msg}} =
+             Deno.run(code, %{globals: %{"apiNames" => ["a"]}, callbacks: %{request: callback}},
+               timeout: 10_000
+             )
+
+    assert msg =~ "credential resolution failed"
+  end
+
+  test "timeout kills the subprocess and returns a named limit" do
+    assert {:error, {:timeout, 500}} =
+             Deno.run("async () => { while (true) {} }", %{globals: %{}, callbacks: %{}},
+               timeout: 500
+             )
+  end
+
+  test "timeout kill actually terminates the OS process (not a pattern match)" do
+    test_pid = self()
+
+    task =
+      Task.async(fn ->
+        Deno.run(
+          "async () => { while (true) {} }",
+          %{globals: %{}, callbacks: %{}},
+          timeout: 500,
+          report_pid: test_pid
+        )
+      end)
+
+    assert_receive {:deno_pid, os_pid}, 2_000
+    assert {:error, {:timeout, 500}} = Task.await(task, 5_000)
+
+    assert wait_until_dead(os_pid), "process #{os_pid} still alive after timeout kill"
+  end
+
+  test "no network access inside the sandbox" do
+    code = ~s|async () => { try { await fetch("https://example.com"); return "fetched"; } catch (e) { return "blocked"; } }|
+
+    assert {:ok, %{value: "blocked"}} =
+             Deno.run(code, %{globals: %{}, callbacks: %{}}, timeout: 10_000)
+  end
+
+  # Polls `ps -p <pid>` for up to ~1s (SIGKILL delivery is not instantaneous)
+  # instead of sleeping a fixed amount. The pid targeted is the exact one
+  # recorded at spawn time via `report_pid` — never a name-based match.
+  defp wait_until_dead(os_pid, attempts \\ 20) do
+    {out, _} = System.cmd("ps", ["-p", Integer.to_string(os_pid)], stderr_to_stdout: true)
+
+    cond do
+      not (out =~ "deno") -> true
+      attempts <= 0 -> false
+      true ->
+        Process.sleep(50)
+        wait_until_dead(os_pid, attempts - 1)
+    end
+  end
 end

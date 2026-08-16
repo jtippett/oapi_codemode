@@ -122,9 +122,9 @@ The sandbox that runs the LLM-written JS sits behind the
   function in place of JS; used by this library's own test suite and
   handy for exercising the plumbing (globals in, callbacks out, results
   back) without a JS runtime.
-- **Subprocess Deno executor** — in progress. A real sandbox with no
+- **`OapiCodemode.Executor.Deno`** — available now. A real sandbox with no
   network access of its own, driven over a `Port` with a line-delimited
-  JSON protocol. No Node/npm dependency.
+  JSON protocol. No Node/npm dependency; requires `deno` on `PATH`.
 
 The `Executor` behaviour contract is stable; swapping executors doesn't
 change how you call `OapiCodemode.tools/1`.

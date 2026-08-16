@@ -12,9 +12,9 @@ defmodule OapiCodemode.Executor.DenoTest do
     globals = %{"specs" => %{"a" => %{"paths" => %{"/x" => %{}}}}}
 
     assert {:ok, %{value: ["/x"]}} =
-             Deno.run("async () => Object.keys(specs.a.paths)", %{globals: globals, callbacks: %{}},
-               timeout: 10_000
-             )
+             Deno.run(
+               "async () => Object.keys(specs.a.paths)",
+               %{globals: globals, callbacks: %{}}, timeout: 10_000)
   end
 
   test "console output is captured as logs" do
@@ -65,9 +65,12 @@ defmodule OapiCodemode.Executor.DenoTest do
   end
 
   test "request callback round-trips" do
-    callback = fn "petstore", %{"path" => "/pets"} -> %{"status" => 200, "body" => %{"n" => 1}} end
+    callback = fn "petstore", %{"path" => "/pets"} ->
+      %{"status" => 200, "body" => %{"n" => 1}}
+    end
 
-    code = ~s|async () => { const r = await apis.petstore.request({ path: "/pets" }); return r.body.n; }|
+    code =
+      ~s|async () => { const r = await apis.petstore.request({ path: "/pets" }); return r.body.n; }|
 
     assert {:ok, %{value: 1}} =
              Deno.run(
@@ -111,7 +114,8 @@ defmodule OapiCodemode.Executor.DenoTest do
   test "callback errors become JS exceptions the code can catch" do
     callback = fn _, _ -> raise "credential resolution failed" end
 
-    code = ~s|async () => { try { await apis.a.request({ path: "/x" }); return "no"; } catch (e) { return e.message; } }|
+    code =
+      ~s|async () => { try { await apis.a.request({ path: "/x" }); return "no"; } catch (e) { return e.message; } }|
 
     assert {:ok, %{value: msg}} =
              Deno.run(code, %{globals: %{"apiNames" => ["a"]}, callbacks: %{request: callback}},
@@ -148,7 +152,8 @@ defmodule OapiCodemode.Executor.DenoTest do
   end
 
   test "no network access inside the sandbox" do
-    code = ~s|async () => { try { await fetch("https://example.com"); return "fetched"; } catch (e) { return "blocked"; } }|
+    code =
+      ~s|async () => { try { await fetch("https://example.com"); return "fetched"; } catch (e) { return "blocked"; } }|
 
     assert {:ok, %{value: "blocked"}} =
              Deno.run(code, %{globals: %{}, callbacks: %{}}, timeout: 10_000)
@@ -161,8 +166,12 @@ defmodule OapiCodemode.Executor.DenoTest do
     {out, _} = System.cmd("ps", ["-p", Integer.to_string(os_pid)], stderr_to_stdout: true)
 
     cond do
-      not (out =~ "deno") -> true
-      attempts <= 0 -> false
+      not (out =~ "deno") ->
+        true
+
+      attempts <= 0 ->
+        false
+
       true ->
         Process.sleep(50)
         wait_until_dead(os_pid, attempts - 1)

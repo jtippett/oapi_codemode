@@ -61,18 +61,38 @@ OapiCodemode.tools(..., policy: :all,
 defmodule Ele.OapiCredentialResolver do
   @behaviour OapiCodemode.Credentials
   @impl true
-  def resolve(api_name, _scheme, context) do
+  def resolve(api_name, _scheme, request, context) do
+    # `request` (added in resolve/4) is the resolved destination — method,
+    # base_url, host, path — resolved before credential attachment, so a
+    # host that wants spend-time allowed-hosts enforcement can check it here
+    # instead of (or in addition to) at registration time.
     {:ok, {:bearer, token}}   # or {:api_key, v} | {:basic, u, p} | :none | {:error, r}
   end
 end
 ```
 
-Gotchas already learned so you don't relearn them: resolver error reasons are
-redacted before the model sees them (full detail goes to Logger); the execute
-result envelope is `{"calls": [...], "logs": [...], "result" | "error": ...}`
-and call metadata survives sandbox crashes — surface it in tool-call UI if
-you can; `OapiCodemode.Executor.Mock` (in lib, deliberately) lets ele's tests
-run without Deno.
+Gotchas already learned so you don't relearn them: a binary `{:error,
+message}` from your resolver crosses to the model *verbatim* — keep secrets
+out of it. Any non-binary `{:error, reason}` (e.g. `{:expired, token}`) is
+logged in full and replaced with a fixed, redacted string before the model
+sees it — that's the one case where the reason is redacted, not resolver
+errors in general; the execute result envelope is `{"calls": [...], "logs":
+[...], "result" | "error": ...}` and call metadata survives sandbox crashes
+— surface it in tool-call UI if you can; `OapiCodemode.Executor.Mock` (in
+lib, deliberately) lets ele's tests run without Deno.
+
+**Registry scope is a host decision, not a library one.** The example above
+uses one boot-time registry for the whole app — fine when every caller is
+equally authorized to reach every registered API. When callers have
+different authorization to different APIs (the common case once a host has
+more than a handful of specs, or a per-tenant/per-agent authorization model),
+scope registries — one registry per authorization boundary, started/torn
+down with it — to whatever grain the host actually gates tool access at.
+Follow the host's *tool-authorization* grain, not its *tenancy* grain: they
+often coincide, but not always, and getting this wrong means an authorized
+caller's sandbox can search and call specs it was never granted (see
+`gentility.md` for a host where per-tenant scoping alone would have been
+wrong).
 
 ## Steps
 

@@ -20,6 +20,7 @@ defmodule OapiCodemode.ProxyTest do
   defmodule HostCheckingResolver do
     @behaviour OapiCodemode.Credentials
 
+    @impl true
     def resolve(_api, _scheme, %{host: "petstore.example.com", method: "get"}, _ctx),
       do: {:ok, {:bearer, "tok"}}
 

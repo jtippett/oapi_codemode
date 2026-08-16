@@ -14,7 +14,15 @@ defmodule OapiCodemode.Credentials do
           | {:api_key, String.t()}
           | :none
 
-  @typedoc "Where the request is going, resolved before credential attachment."
+  @typedoc """
+  Where the request is going, resolved before credential attachment.
+
+  `path` is the OpenAPI path *template* — path params are not substituted
+  (e.g. `"/pets/{id}"`, not `"/pets/42"`). `base_url` may itself include a
+  path prefix (e.g. `"https://api.example.com/v1"`); the full wire path is
+  `base_url`'s path segment concatenated with the substituted `path`, not
+  `path` alone. `method` is always lowercase (`"get"`, not `"GET"`).
+  """
   @type request_info :: %{
           method: String.t(),
           base_url: String.t(),
@@ -25,6 +33,12 @@ defmodule OapiCodemode.Credentials do
   @doc """
   Resolve a credential for one request. `context` is the opaque identity map
   the host passed into the execute handler (tenant, user, org).
+
+  **Error contract:** a binary `{:error, message}` crosses back to the
+  sandbox/model *verbatim* — hosts must keep secrets out of binary error
+  messages. Any non-binary `{:error, reason}` (e.g. `{:expired, token}`) is
+  logged in full and replaced with a fixed, redacted string before it
+  reaches the sandbox.
   """
   @callback resolve(
               api_name :: String.t(),

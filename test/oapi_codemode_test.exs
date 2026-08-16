@@ -14,19 +14,19 @@ defmodule OapiCodemodeTest do
 
   test "register/4 registers a pre-ingested artifact without re-parsing" do
     {:ok, registry} = OapiCodemode.Registry.start_link(name: nil)
-    {:ok, artifact} = OapiCodemode.ingest(OapiCodemode.Fixtures.petstore_json())
+    {:ok, artifact} = OapiCodemode.ingest(OapiCodemode.Fixtures.clean_3_1())
 
     assert :ok =
              OapiCodemode.register(registry, "petstore", artifact,
                base_url: "https://api.example.com"
              )
 
-    assert {:ok, _entry} = OapiCodemode.Registry.lookup(registry, "petstore")
+    assert {:ok, %{artifact: ^artifact}} = OapiCodemode.Registry.lookup(registry, "petstore")
   end
 
   test "register/4 rejects unknown config options" do
     {:ok, registry} = OapiCodemode.Registry.start_link(name: nil)
-    {:ok, artifact} = OapiCodemode.ingest(OapiCodemode.Fixtures.petstore_json())
+    {:ok, artifact} = OapiCodemode.ingest(OapiCodemode.Fixtures.clean_3_1())
 
     assert {:error, {:invalid_config_option, :base_urll}} =
              OapiCodemode.register(registry, "petstore", artifact, base_urll: "x")

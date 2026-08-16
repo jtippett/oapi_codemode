@@ -29,6 +29,7 @@ style — e.g. `ApiConfig.security_scheme` accepting an inline scheme map
 (`%{"type" => "http", "scheme" => "bearer"}`) in addition to a named scheme
 from the spec.
 **Severity:** blocking
+**Resolved:** 4ae4d49
 
 ## 2026-08-16 — gentility — no per-API req_options in ApiConfig
 
@@ -40,6 +41,7 @@ config has nowhere to live.
 **What the library should do differently:** Add `req_options` to `ApiConfig`
 (registration-time, per API), merged beneath call-time `host_ctx.req_options`.
 **Severity:** annoying
+**Resolved:** 8a7b97e
 
 ## 2026-08-16 — gentility — resolver never sees the request destination
 
@@ -52,6 +54,7 @@ time (sound, since the host fixes `base_url` and the agent only picks paths
 (or full URL) to `resolve/3` (e.g. in a request-info map) so hosts can
 enforce spend-time allowlists at the resolver choke point.
 **Severity:** annoying (defense-in-depth)
+**Resolved:** 09d0e2d
 
 ## 2026-08-16 — gentility — two opposite-visibility things named `context`
 
@@ -62,6 +65,7 @@ leaks tenant data into the sandbox/transcript.
 **What the library should do differently:** Rename `ApiConfig.context` to
 `sandbox_globals` (or similar) before hex release, while renaming is cheap.
 **Severity:** annoying (footgun, cosmetic fix)
+**Resolved:** 1cddb8e
 
 ## 2026-08-16 — gentility — facade lacks a cached-artifact registration path
 
@@ -74,6 +78,7 @@ artifact caching means calling into `Registry` directly.
 `OapiCodemode.register/4` taking a pre-ingested `%Artifact{}` (and document
 `Ingest.ingest/1` as the public way to produce one for caching).
 **Severity:** cosmetic
+**Resolved:** fabd316
 
 ## 2026-08-16 — gentility — search tool name is not configurable
 
@@ -85,6 +90,7 @@ naming scheme cannot cover search.
 **What the library should do differently:** Add a `:search_tool_name`
 option (default `"search_apis"`), symmetric with `:execute_tool_name`.
 **Severity:** annoying
+**Resolved:** e47fd6a
 
 ## 2026-08-16 — gentility — integration guide's per-org registry advice is stale
 
@@ -99,3 +105,4 @@ integrations, resolver re-checks the binding per request.
 per-looper scoping; note in `ele.md`'s generic guidance that registry scope
 should follow the host's tool-authorization grain, not tenancy grain.
 **Severity:** cosmetic (doc fix)
+**Resolved:** docs update, this commit

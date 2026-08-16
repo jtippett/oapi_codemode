@@ -86,6 +86,26 @@ Enum.find(tools, &(&1.name == tool_name)).handler.(
 your credential resolver so it can look up the right token for whoever
 is making the call.
 
+### Caching a parsed spec across registrations
+
+`ingest_and_register/4` parses and registers in one call — fine for a
+boot-time registry that ingests each spec once. Hosts that build a registry
+more often than that (per loop start, per request, ...) should parse once
+and cache the result: `OapiCodemode.ingest/1` is the pure ingest step, and
+`OapiCodemode.register/4` registers an already-ingested `%Artifact{}`
+without re-parsing it.
+
+```elixir
+{:ok, artifact} = OapiCodemode.ingest(File.read!("petstore.json"))
+# ... stash `artifact` in your own cache, keyed however you invalidate it ...
+:ok = OapiCodemode.register(registry, "petstore", artifact, base_url: "https://api.petstore.example.com/v1")
+```
+
+`register/4` takes the same config options as `ingest_and_register/4`
+(`base_url`, `security_scheme`, `sandbox_globals`, `req_options`, `validate`,
+`max_response_bytes`) and returns `{:error, {:invalid_config_option, key}}`
+for an unrecognized one, same as `ingest_and_register/4`.
+
 ## Credential resolver
 
 Implement the `OapiCodemode.Credentials` behaviour to tell the library
@@ -97,21 +117,76 @@ defmodule MyApp.CredentialResolver do
   @behaviour OapiCodemode.Credentials
 
   @impl true
-  def resolve("petstore", _security_scheme, %{user_id: user_id}) do
+  def resolve("petstore", _security_scheme, _request, %{user_id: user_id}) do
     {:ok, {:bearer, MyApp.Tokens.fetch!(user_id, :petstore)}}
   end
 
-  def resolve(_api_name, _security_scheme, _context) do
+  def resolve(_api_name, _security_scheme, _request, _context) do
     {:ok, :none}
   end
 end
 ```
 
-`resolve/3` returns `{:ok, {:bearer, token}}`, `{:ok, {:basic, user,
+`resolve/4` returns `{:ok, {:bearer, token}}`, `{:ok, {:basic, user,
 pass}}`, `{:ok, {:api_key, value}}`, `{:ok, :none}`, or `{:error,
 reason}`. The credential value is attached to the outgoing request by
 `OapiCodemode.Credentials.attach/2` and never crosses into the sandbox
 or gets logged in a tool call transcript.
+
+The third argument, `request`, is the resolved destination — `%{method:,
+base_url:, host:, path:}` — computed *before* credential attachment, so a
+resolver can enforce a spend-time allowlist (exact host, https-only, ...) at
+the same choke point it resolves credentials, not just at registration time.
+`path` is the OpenAPI path template (unsubstituted); the full wire path is
+`base_url`'s path prefix, if any, plus the substituted path.
+
+**Error contract:** return a binary `{:error, message}` and it crosses to
+the sandbox/model *verbatim* — never put a credential or other secret in
+that string. Return any non-binary reason (`{:error, {:expired, token}}`,
+`{:error, :not_found}`, ...) and the library logs it in full via `Logger`
+but replaces it with a fixed, redacted string before it reaches the model.
+
+## Registration options
+
+`ingest_and_register/4` and `register/4` take the same `ApiConfig` options:
+
+- `base_url` — overrides the spec's `servers[]`; required if the spec has
+  none or picks the wrong one.
+- `security_scheme` — either the *name* of a `securityScheme` from the
+  spec's `components`, `nil` (use the first scheme the matched operation
+  declares), or an **inline scheme map** — e.g. `%{"type" => "http",
+  "scheme" => "bearer"}` — for specs that omit or mis-declare
+  `securitySchemes` entirely. The host, not the spec, usually knows the true
+  auth kind; an inline map lets it say so directly instead of forcing a
+  schemeless spec through `:none`.
+- `sandbox_globals` — a model-visible map merged into the JS `context`
+  global for this API (e.g. `%{"accountId" => "..."}` → `context.petstore.accountId`
+  in the sandbox). Model-visible: never put secrets here — this is not the
+  same `context` as the resolver's `context` argument, which is
+  host-identity data and never enters the sandbox.
+- `req_options` — a per-API keyword list of `Req.new/1` options (e.g.
+  `connect_options` for an egress proxy), appended ahead of the call-time
+  `host_ctx.req_options` passed to the tool handler. Scalar options (like
+  `:connect_options` or `:redirect`) let the call-time value win on
+  conflict; `:headers` and `:params` are *merged* by `Req`, not replaced, so
+  entries from both layers survive.
+- `validate` — `:strict` (default, rejects on the first schema mismatch),
+  `:warn` (logs and proceeds), or `:off`.
+- `max_response_bytes` — upstream response body cap surfaced to the
+  sandbox (default `200_000`).
+
+## Custom tool names
+
+`OapiCodemode.tools/1` accepts `:search_tool_name` (default `"search_apis"`)
+and `:execute_tool_name` (default `"execute_api_code"`) to rename the
+emitted tools — useful when a host runs one registry per API instance and
+wants per-instance tool names instead of one shared pair:
+
+```elixir
+OapiCodemode.tools(registry: reg, executor: OapiCodemode.Executor.Deno,
+  resolver: MyApp.CredentialResolver, policy: :read_only,
+  search_tool_name: "petstore_api_search", execute_tool_name: "petstore_api_execute")
+```
 
 ## Executor status
 

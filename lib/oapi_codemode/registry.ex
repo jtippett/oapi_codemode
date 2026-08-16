@@ -2,6 +2,11 @@ defmodule OapiCodemode.Registry do
   @moduledoc """
   Holds ingested artifacts and per-API config in ETS. No persistence:
   hosts re-register at boot from wherever they keep specs.
+
+  Reads pay one GenServer.call to fetch the table ref — deliberate: lookups
+  happen a handful of times per LLM tool call, so the hop is noise next to
+  the LLM turn and the upstream HTTP request, and it keeps unnamed
+  per-test registries isolated (a :named_table would not).
   """
 
   use GenServer

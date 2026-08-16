@@ -164,16 +164,22 @@ defmodule OapiCodemode.Proxy do
   end
 
   defp selected_scheme(entry, op) do
-    schemes = entry.artifact.security_schemes
+    case entry.config.security_scheme do
+      scheme when is_map(scheme) ->
+        scheme
 
-    name =
-      entry.config.security_scheme ||
-        case op.security do
-          [req | _] when is_map(req) and map_size(req) > 0 -> req |> Map.keys() |> hd()
-          _ -> nil
-        end
+      name_or_nil ->
+        schemes = entry.artifact.security_schemes
 
-    if name, do: schemes[name], else: nil
+        name =
+          name_or_nil ||
+            case op.security do
+              [req | _] when is_map(req) and map_size(req) > 0 -> req |> Map.keys() |> hd()
+              _ -> nil
+            end
+
+        if name, do: schemes[name], else: nil
+    end
   end
 
   defp execute(config, op, path_params, query, body, auth, opts, ctx) do

@@ -2,7 +2,7 @@ defmodule OapiCodemode.ApiConfig do
   @moduledoc "Per-API registration config. Everything the spec cannot know."
 
   defstruct base_url: nil,
-            # name of the securityScheme to use; nil = first one in the spec
+            # name of a securityScheme in the spec, an inline scheme map, or nil (first in spec)
             security_scheme: nil,
             # values injected as sandbox globals for this API (e.g. account ids)
             context: %{},

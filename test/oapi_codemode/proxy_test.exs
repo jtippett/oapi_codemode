@@ -362,6 +362,28 @@ defmodule OapiCodemode.ProxyTest do
       %Operation{id: "op", method: "get", path: path, segments: segments, parameters: params}
     end
 
+    test "inline security_scheme map credentials a spec with no securitySchemes" do
+      entry =
+        free_entry([get_op("/items", ["items"])],
+          security_scheme: %{"type" => "http", "scheme" => "bearer"}
+        )
+
+      Req.Test.stub(OapiCodemodeStub, fn conn ->
+        assert Plug.Conn.get_req_header(conn, "authorization") == ["Bearer tok"]
+        Req.Test.json(conn, %{})
+      end)
+
+      ctx = %{free_ctx(StaticResolver) | context: %{token: "tok"}}
+
+      assert {:ok, %{status: 200}} =
+               Proxy.request(
+                 entry,
+                 "petstore",
+                 %{"method" => "GET", "path" => "/items"},
+                 ctx
+               )
+    end
+
     # C1(a): Mint's invalid-header errors embed the raw credential value, so
     # a transport error message must never reach the caller — only a fixed
     # string plus the exception's module name.

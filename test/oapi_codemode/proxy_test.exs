@@ -152,6 +152,53 @@ defmodule OapiCodemode.ProxyTest do
              )
   end
 
+  test "per-API req_options are used when host context has none", %{entry: entry, ctx: ctx} do
+    Req.Test.stub(PerApiReqOptionsStub, fn conn ->
+      Req.Test.json(conn, %{"source" => "config"})
+    end)
+
+    entry = %{
+      entry
+      | config: %{
+          entry.config
+          | req_options: [plug: {Req.Test, PerApiReqOptionsStub}]
+        }
+    }
+
+    ctx = %{ctx | req_options: []}
+
+    assert {:ok, %{status: 200, body: %{"source" => "config"}}} =
+             Proxy.request(
+               entry,
+               "petstore",
+               %{"method" => "GET", "path" => "/pets", "query" => %{"limit" => 1}},
+               ctx
+             )
+  end
+
+  test "call-time req_options override per-API options", %{entry: entry, ctx: ctx} do
+    Req.Test.stub(PerApiLosingStub, fn _conn -> flunk("config plug must be overridden") end)
+    Req.Test.stub(CallTimeWinningStub, fn conn -> Req.Test.json(conn, %{"source" => "call"}) end)
+
+    entry = %{
+      entry
+      | config: %{
+          entry.config
+          | req_options: [plug: {Req.Test, PerApiLosingStub}]
+        }
+    }
+
+    ctx = %{ctx | req_options: [plug: {Req.Test, CallTimeWinningStub}]}
+
+    assert {:ok, %{status: 200, body: %{"source" => "call"}}} =
+             Proxy.request(
+               entry,
+               "petstore",
+               %{"method" => "GET", "path" => "/pets", "query" => %{"limit" => 1}},
+               ctx
+             )
+  end
+
   test "JSON body is posted; response headers are whitelisted", %{entry: entry, ctx: ctx} do
     Req.Test.stub(OapiCodemodeStub, fn conn ->
       {:ok, raw, conn} = Plug.Conn.read_body(conn)

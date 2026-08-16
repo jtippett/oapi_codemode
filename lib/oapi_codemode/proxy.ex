@@ -212,7 +212,7 @@ defmodule OapiCodemode.Proxy do
             # that wants redirects can pass `redirect: true` in req_options,
             # which is appended after this default and wins.
             redirect: false
-          ] ++ ctx.req_options
+          ] ++ config.req_options ++ ctx.req_options
         )
 
       case Req.request(req) do

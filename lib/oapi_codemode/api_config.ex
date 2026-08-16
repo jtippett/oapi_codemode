@@ -8,7 +8,9 @@ defmodule OapiCodemode.ApiConfig do
             context: %{},
             validate: :strict,
             # max upstream response body bytes surfaced to the sandbox
-            max_response_bytes: 200_000
+            max_response_bytes: 200_000,
+            # per-API Req options (e.g. egress proxy connect_options); call-time host_ctx.req_options wins on conflict
+            req_options: []
 
   @type t :: %__MODULE__{}
 end

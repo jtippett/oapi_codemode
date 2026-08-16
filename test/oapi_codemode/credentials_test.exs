@@ -91,6 +91,44 @@ defmodule OapiCodemode.CredentialsTest do
              Credentials.attach(scheme, {:api_key, "abc123"})
   end
 
+  # P-C1: a credential VALUE carrying a non-printable byte (the classic
+  # secret-with-a-trailing-newline) must be rejected here, before Mint sees
+  # it — Mint's invalid-header error embeds the raw value in its message.
+  # The rejection must never echo the value.
+  test "bearer token with a trailing newline is rejected without echoing it" do
+    assert {:error, msg} = Credentials.attach(@bearer_scheme, {:bearer, "tok-SECRET\n"})
+    assert msg == "credential contains non-printable characters"
+    refute msg =~ "SECRET"
+  end
+
+  test "api key with an embedded CR is rejected" do
+    assert {:error, msg} = Credentials.attach(@header_key, {:api_key, "k\r\nX-Admin: 1"})
+    assert msg == "credential contains non-printable characters"
+    refute msg =~ "X-Admin"
+  end
+
+  test "basic auth password with a control byte is rejected" do
+    assert {:error, msg} = Credentials.attach(@basic_scheme, {:basic, "user", "pa\0ss"})
+    assert msg == "credential contains non-printable characters"
+  end
+
+  test "query api key with a newline is rejected" do
+    assert {:error, "credential contains non-printable characters"} =
+             Credentials.attach(@query_key, {:api_key, "k\n"})
+  end
+
+  test "printable non-ASCII credentials are still accepted" do
+    assert {:ok, %{headers: [{"authorization", "Basic " <> b64}]}} =
+             Credentials.attach(@basic_scheme, {:basic, "üser", "pässwörd"})
+
+    assert Base.decode64!(b64) == "üser:pässwörd"
+  end
+
+  test "a non-binary credential value fails closed with the shape error" do
+    assert {:error, msg} = Credentials.attach(@bearer_scheme, {:bearer, 42})
+    assert msg =~ "credential must be"
+  end
+
   # M8: an apiKey header name that isn't a valid HTTP token must be rejected,
   # and the (potentially malicious, multiline) name must never be echoed
   # back verbatim in the error message.

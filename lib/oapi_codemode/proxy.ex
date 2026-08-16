@@ -1,14 +1,21 @@
 defmodule OapiCodemode.Proxy do
   @moduledoc """
   The validating, credential-injecting request pipeline:
-  match -> validate -> policy -> credentials -> execute -> normalize.
+  match -> policy -> validate -> credentials -> execute -> normalize.
 
   Requests come from the sandbox as JSON-shaped maps (string keys). Errors
   return `%{phase: atom, message: String.t()}` — phase-tagged so tool-layer
   error messages can say what failed without leaking internals.
+
+  Error messages crossing back to the sandbox are fixed strings wherever the
+  underlying detail could embed a credential (transport failures, resolver
+  reasons). The detail goes to `Logger` instead.
   """
 
+  require Logger
+
   alias OapiCodemode.{ApiConfig, Credentials}
+  alias OapiCodemode.Ingest.Normalize
   alias OapiCodemode.Proxy.{Matcher, Query, Validator}
   alias OapiCodemode.Registry.Entry
 
@@ -24,7 +31,7 @@ defmodule OapiCodemode.Proxy do
         }
 
   @spec request(%Entry{}, String.t(), request_opts(), ctx()) ::
-          {:ok, %{status: integer(), headers: list(), body: term()}}
+          {:ok, %{status: integer(), headers: %{String.t() => String.t()}, body: term()}}
           | {:error, %{phase: atom(), message: String.t()}}
   def request(%Entry{} = entry, api_name, opts, ctx) do
     method = opts |> Map.get("method", "GET") |> to_string()
@@ -36,40 +43,43 @@ defmodule OapiCodemode.Proxy do
     start = System.monotonic_time()
     :telemetry.execute([:oapi_codemode, :request, :start], %{}, meta)
 
-    result =
-      with {:ok, op, path_params} <- match(entry, method, path),
-           :ok <- policy(ctx.policy, op.method),
-           :ok <- validate(entry.config, op, query, body, path_params),
-           {:ok, auth} <- credentials(entry, api_name, op, ctx),
-           {:ok, resp} <- execute(entry.config, op, path_params, query, body, auth, opts, ctx) do
-        {:ok, resp, op}
-      end
-
-    case result do
-      {:ok, resp, op} ->
-        emit_stop(start, %{meta | operation: op.id}, resp.status)
-        {:ok, resp}
-
-      {:error, %{phase: _} = err} ->
-        :telemetry.execute(
-          [:oapi_codemode, :request, :error],
-          %{},
-          Map.put(meta, :error, err.phase)
-        )
-
+    # M2: the matched operation is threaded out of the pipeline separately so
+    # the *error* event can name it too — a failing operation is exactly the
+    # one an operator needs to see on a dashboard.
+    case match(entry, method, path) do
+      {:error, err} ->
+        emit_error(start, meta, err)
         {:error, err}
+
+      {:ok, op, path_params} ->
+        meta = %{meta | operation: op.id}
+
+        case after_match(entry, api_name, op, path_params, query, body, opts, ctx) do
+          {:ok, resp} ->
+            emit(start, [:oapi_codemode, :request, :stop], Map.put(meta, :status, resp.status))
+            {:ok, resp}
+
+          {:error, err} ->
+            emit_error(start, meta, err)
+            {:error, err}
+        end
     end
   end
 
-  defp emit_stop(start, meta, status) do
-    duration = System.monotonic_time() - start
-
-    :telemetry.execute(
-      [:oapi_codemode, :request, :stop],
-      %{duration: duration},
-      Map.put(meta, :status, status)
-    )
+  defp after_match(entry, api_name, op, path_params, query, body, opts, ctx) do
+    with :ok <- policy(ctx.policy, op.method),
+         :ok <- validate(entry.config, op, query, body, path_params),
+         {:ok, auth} <- credentials(entry, api_name, op, ctx),
+         :ok <- reserved_query(query, auth) do
+      execute(entry.config, op, path_params, query, body, auth, opts, ctx)
+    end
   end
+
+  defp emit_error(start, meta, err),
+    do: emit(start, [:oapi_codemode, :request, :error], Map.put(meta, :error, err.phase))
+
+  defp emit(start, event, meta),
+    do: :telemetry.execute(event, %{duration: System.monotonic_time() - start}, meta)
 
   defp match(entry, method, path) do
     case Matcher.match(entry.artifact.operations, method, path) do
@@ -109,7 +119,6 @@ defmodule OapiCodemode.Proxy do
         :ok
 
       {:error, message} when mode == :warn ->
-        require Logger
         Logger.warning("oapi_codemode validation (warn mode): #{message}")
         :ok
 
@@ -128,9 +137,29 @@ defmodule OapiCodemode.Proxy do
       {:error, message} when is_binary(message) ->
         {:error, %{phase: :credentials, message: message}}
 
+      # C1(b): a host resolver's failure reason is free-form and routinely
+      # embeds the token it failed on ({:expired, "tok-..."}). Log it, return
+      # a fixed string.
       {:error, reason} ->
+        Logger.error(
+          "oapi_codemode credential resolution failed for #{inspect(api_name)}: #{inspect(reason)}"
+        )
+
+        {:error, %{phase: :credentials, message: "credential resolution failed"}}
+    end
+  end
+
+  # C2: auth query params are injected after the LLM's. A colliding key from
+  # the sandbox would either overwrite the credential or (with a permissive
+  # upstream) echo it back in an error. Reject before the request is built.
+  defp reserved_query(query, auth) do
+    case Enum.find(Map.keys(auth.query), &Map.has_key?(query, &1)) do
+      nil ->
+        :ok
+
+      name ->
         {:error,
-         %{phase: :credentials, message: "credential resolution failed: #{inspect(reason)}"}}
+         %{phase: :policy, message: "query parameter #{name} is reserved for authentication"}}
     end
   end
 
@@ -148,11 +177,10 @@ defmodule OapiCodemode.Proxy do
   end
 
   defp execute(config, op, path_params, query, body, auth, opts, ctx) do
-    with {:ok, query_string} <- build_query_string(op, query, auth) do
+    with {:ok, query_string} <- build_query_string(op, query, auth),
+         {:ok, req_body, content_type} <- encode_body(body, opts) do
       url = build_url(config.base_url, op, path_params)
       full_url = if query_string == "", do: url, else: url <> "?" <> query_string
-
-      {req_body, content_type} = encode_body(body, opts)
 
       headers =
         auth.headers ++ if content_type, do: [{"content-type", content_type}], else: []
@@ -165,7 +193,12 @@ defmodule OapiCodemode.Proxy do
             headers: headers,
             body: req_body,
             retry: false,
-            max_retries: 0
+            max_retries: 0,
+            # I5: a 3xx comes back as data. Following it would re-send the
+            # Authorization header to a host the *upstream* chose. A host
+            # that wants redirects can pass `redirect: true` in req_options,
+            # which is appended after this default and wins.
+            redirect: false
           ] ++ ctx.req_options
         )
 
@@ -178,11 +211,19 @@ defmodule OapiCodemode.Proxy do
              body: cap_body(resp.body, config.max_response_bytes)
            }}
 
+        # C1(a): Mint's invalid-header errors quote the offending header
+        # VALUE — i.e. the credential — in their message. Nothing but the
+        # exception's module name may cross back.
         {:error, err} ->
-          {:error, %{phase: :transport, message: "request failed: #{Exception.message(err)}"}}
+          Logger.error("oapi_codemode upstream request failed: #{inspect(err)}")
+
+          {:error, %{phase: :transport, message: "upstream request failed (#{error_name(err)})"}}
       end
     end
   end
+
+  defp error_name(%mod{}), do: inspect(mod)
+  defp error_name(_), do: "unknown"
 
   # I3: query params that can't be serialized (e.g. a nested map/list without
   # a style that knows how to flatten it) surface as a :validate-phase error
@@ -207,15 +248,10 @@ defmodule OapiCodemode.Proxy do
     end
   end
 
-  @http_methods %{
-    "get" => :get,
-    "post" => :post,
-    "put" => :put,
-    "patch" => :patch,
-    "delete" => :delete,
-    "head" => :head,
-    "options" => :options
-  }
+  # M4: derived from the ingest side's method list so the two can't drift —
+  # a method Normalize starts extracting but the proxy can't send would be a
+  # FunctionClauseError at request time.
+  @http_methods Map.new(Normalize.methods(), &{&1, String.to_atom(&1)})
 
   defp http_method(method), do: Map.fetch!(@http_methods, method)
 
@@ -246,14 +282,22 @@ defmodule OapiCodemode.Proxy do
     |> Enum.map(fn {k, v} -> {k, v, %{}} end)
   end
 
-  defp encode_body(nil, _opts), do: {nil, nil}
+  defp encode_body(nil, _opts), do: {:ok, nil, nil}
 
-  defp encode_body(body, %{"rawBody" => true} = opts),
-    do: {body, opts["contentType"] || "application/octet-stream"}
+  defp encode_body(body, %{"rawBody" => true} = opts) when is_binary(body),
+    do: {:ok, body, opts["contentType"] || "application/octet-stream"}
+
+  # I2: Req hands a raw body straight to the adapter as iodata. A map here
+  # raises ArgumentError deep inside Mint; it's a request-shape mistake the
+  # caller can fix, so name it.
+  defp encode_body(_body, %{"rawBody" => true}),
+    do: {:error, %{phase: :validate, message: "rawBody requires a string body"}}
 
   defp encode_body(body, opts),
-    do: {Jason.encode!(body), opts["contentType"] || "application/json"}
+    do: {:ok, Jason.encode!(body), opts["contentType"] || "application/json"}
 
+  # I4: a map, matching the `Record<string, string>` the execute tool
+  # declares. Repeated headers (set-cookie-ish) join with ", " per RFC 9110.
   defp whitelist_headers(headers) do
     headers
     |> Enum.flat_map(fn {k, vs} -> Enum.map(List.wrap(vs), &{String.downcase(k), &1}) end)
@@ -261,24 +305,69 @@ defmodule OapiCodemode.Proxy do
       k in @response_header_whitelist or
         Enum.any?(@response_header_prefixes, &String.starts_with?(k, &1))
     end)
+    |> Enum.reduce(%{}, fn {k, v}, acc -> Map.update(acc, k, v, &(&1 <> ", " <> v)) end)
   end
 
+  # I3: the cap is a BYTE cap (String.slice/3 counts graphemes, which let
+  # ~2-4x the budget through for non-ASCII text), and a body that isn't
+  # valid UTF-8 never flows onward as raw bytes — Jason.encode! would crash
+  # on it once the tool layer wraps the result.
   defp cap_body(body, max_bytes) when is_binary(body) do
-    if byte_size(body) > max_bytes do
-      String.slice(body, 0, max_bytes) <> "\n[truncated: response exceeded #{max_bytes} bytes]"
+    cond do
+      not String.valid?(body) ->
+        binary_envelope(body, max_bytes)
+
+      byte_size(body) > max_bytes ->
+        truncate_bytes(body, max_bytes) <> truncation_marker(max_bytes)
+
+      true ->
+        body
+    end
+  end
+
+  # Req already decoded JSON. If it's over budget, say so structurally —
+  # replacing a map with a chopped, unparseable JSON string silently changes
+  # the response's type out from under the sandbox.
+  defp cap_body(body, max_bytes) do
+    encoded = Jason.encode!(body)
+
+    if byte_size(encoded) > max_bytes do
+      %{
+        "truncated" => true,
+        "bytes" => byte_size(encoded),
+        "preview" => truncate_bytes(encoded, max_bytes)
+      }
     else
       body
     end
   end
 
-  # Req already decoded JSON; cap after re-encoding only if enormous.
-  defp cap_body(body, max_bytes) do
-    encoded = Jason.encode!(body)
+  defp binary_envelope(body, max_bytes) do
+    truncated? = byte_size(body) > max_bytes
+    bytes = if truncated?, do: binary_part(body, 0, max_bytes), else: body
 
-    if byte_size(encoded) > max_bytes do
-      String.slice(encoded, 0, max_bytes) <> "\n[truncated: response exceeded #{max_bytes} bytes]"
-    else
-      body
+    %{
+      "encoding" => "base64",
+      "data" => Base.encode64(bytes),
+      "note" => "response was not valid UTF-8",
+      "truncated" => truncated?,
+      "bytes" => byte_size(body)
+    }
+  end
+
+  defp truncation_marker(max_bytes), do: "\n[truncated: response exceeded #{max_bytes} bytes]"
+
+  # Cut at the byte budget, then walk back (at most 3 bytes) off any
+  # half-written codepoint so the result is still a valid string.
+  defp truncate_bytes(bin, max_bytes) do
+    bin |> binary_part(0, max_bytes) |> trim_to_valid()
+  end
+
+  defp trim_to_valid(bin) do
+    cond do
+      String.valid?(bin) -> bin
+      byte_size(bin) == 0 -> ""
+      true -> bin |> binary_part(0, byte_size(bin) - 1) |> trim_to_valid()
     end
   end
 end

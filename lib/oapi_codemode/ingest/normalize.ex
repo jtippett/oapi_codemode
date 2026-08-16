@@ -9,6 +9,16 @@ defmodule OapiCodemode.Ingest.Normalize do
 
   @methods ~w(get post put patch delete head options)
 
+  @doc """
+  The HTTP methods this module extracts operations for.
+
+  Exposed so the proxy can derive its own method table from it (M4): a
+  method extracted here but unknown to the proxy would blow up at request
+  time rather than at ingest.
+  """
+  @spec methods() :: [String.t()]
+  def methods, do: @methods
+
   @spec operations(map()) :: [Operation.t()]
   def operations(spec) do
     spec

@@ -24,9 +24,47 @@ defmodule OapiCodemode.Credentials do
   # RFC 7230 token charset — what's legal in an HTTP header field name.
   @header_token_re ~r/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/
 
+  @shape_error "credential must be {:bearer, _}, {:basic, _, _}, {:api_key, _}, or :none"
+
+  @doc """
+  Turn a resolved credential into headers and query params for one request.
+
+  Credential *values* are screened for non-printable bytes first: a secret
+  with a stray newline (the classic env-var-with-trailing-`\\n`) would
+  otherwise reach Mint, whose `invalid_header_value` error embeds the raw
+  value in its message and leaks it into whatever logs that message. Errors
+  from here never echo the credential.
+  """
   @spec attach(map() | nil, credential()) ::
           {:ok, %{headers: [{String.t(), String.t()}], query: map()}} | {:error, String.t()}
-  def attach(scheme, credential), do: do_attach(normalize_scheme(scheme), credential)
+  def attach(scheme, credential) do
+    with :ok <- check_values(credential_values(credential)) do
+      do_attach(normalize_scheme(scheme), credential)
+    end
+  end
+
+  defp credential_values({:bearer, token}), do: [token]
+  defp credential_values({:api_key, value}), do: [value]
+  defp credential_values({:basic, user, pass}), do: [user, pass]
+  defp credential_values(_), do: []
+
+  defp check_values(values) do
+    cond do
+      not Enum.all?(values, &is_binary/1) -> {:error, @shape_error}
+      Enum.all?(values, &printable?/1) -> :ok
+      true -> {:error, "credential contains non-printable characters"}
+    end
+  end
+
+  # C0 controls, DEL, and C1 controls are the bytes that break header
+  # framing (CR/LF) or that no real credential contains. Printable non-ASCII
+  # stays legal — basic-auth passwords are base64'd anyway.
+  defp printable?(value) do
+    String.valid?(value) and
+      Enum.all?(String.to_charlist(value), fn c ->
+        c >= 0x20 and c != 0x7F and not (c >= 0x80 and c <= 0x9F)
+      end)
+  end
 
   # RFC 7235 auth-scheme tokens are case-insensitive; normalize once so
   # "Bearer"/"Basic" (capitalized, RFC-legal) don't fail closed.
@@ -86,7 +124,5 @@ defmodule OapiCodemode.Credentials do
   # malformed, e.g. a bare string a buggy resolver returned). Never
   # inspect/interpolate `credential` here — it may hold a raw secret and
   # this message can end up in logs or crash traces.
-  defp do_attach(_scheme, _credential) do
-    {:error, "credential must be {:bearer, _}, {:basic, _, _}, {:api_key, _}, or :none"}
-  end
+  defp do_attach(_scheme, _credential), do: {:error, @shape_error}
 end

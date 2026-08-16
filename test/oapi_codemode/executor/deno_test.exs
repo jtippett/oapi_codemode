@@ -165,6 +165,24 @@ defmodule OapiCodemode.Executor.DenoTest do
     assert wait_until_dead(os_pid), "process #{os_pid} still alive after timeout kill"
   end
 
+  # Regression: `run/3` used to open the port on (and receive its
+  # messages on) the CALLING process. The `{:exit_status, _}` message the
+  # OS sends when the child dies can arrive after "done" is already
+  # processed and `run/3` has returned — undrained, it would sit in the
+  # caller's mailbox and land on whatever that caller's next unrelated
+  # `receive`/`handle_info` was (fatal for a GenServer calling this
+  # synchronously from a message handler, which is exactly how gentility's
+  # LoopServer calls it). `run/3` now owns the port from inside a
+  # throwaway Task, so nothing should ever reach this test process's own
+  # mailbox.
+  test "no stray port messages leak into the calling process after run/3 returns" do
+    assert {:ok, %{value: 1}} =
+             Deno.run("async () => 1", %{globals: %{}, callbacks: %{}}, timeout: 10_000)
+
+    refute_receive {_port, {:exit_status, _}}, 200
+    refute_receive {_port, {:data, _}}, 0
+  end
+
   test "no network access inside the sandbox" do
     code =
       ~s|async () => { try { await fetch("https://example.com"); return "fetched"; } catch (e) { return "blocked"; } }|

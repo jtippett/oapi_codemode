@@ -28,6 +28,21 @@ defmodule OapiCodemode.Executor.Deno do
   fake `done` line. Severity is low: the sandbox already runs with zero
   permissions (no network/filesystem/env), so the worst case is a confused
   result for that one run, not an escape from the sandbox.
+
+  Port ownership: `Port.open/2` ties the port's messages — including the
+  `{:exit_status, _}` message the OS delivers when the child dies — to
+  whichever process calls it. `run/3` may already have returned via the
+  "done" callback protocol before that trailing exit-status message
+  reaches the mailbox (the child writes "done" to stdout and calls
+  `Deno.exit(0)` back-to-back; the pipe-data and process-exit
+  notifications race independently). A caller that invokes `run/3`
+  synchronously from inside a long-lived process (a GenServer handling a
+  tool call, say) would otherwise see that straggler delivered to its next
+  unrelated `receive`/`handle_info` and crash on a message it has no
+  clause for — this happened for real integrating with a host's loop
+  server. So the whole port lifecycle runs inside a throwaway `Task`
+  instead: any message that outlives the run dies with that task's
+  mailbox rather than leaking into the caller.
   """
 
   @behaviour OapiCodemode.Executor
@@ -36,6 +51,25 @@ defmodule OapiCodemode.Executor.Deno do
 
   @impl true
   def run(code, env, opts) do
+    timeout = Keyword.get(opts, :timeout, 30_000)
+
+    # `do_run/3` is made total (never raises — see `safe_run/3`) precisely
+    # so `Task.await/2` here always gets a normal return value instead of
+    # an EXIT signal. An EXIT from a crashed task is NOT a `rescue`-able
+    # exception, and callers of this behaviour (e.g.
+    # `OapiCodemode.Tools.run_sandbox/3`) rely on being able to `rescue` a
+    # misbehaving executor.
+    Task.async(fn -> safe_run(code, env, opts) end)
+    |> Task.await(timeout + 5_000)
+  end
+
+  defp safe_run(code, env, opts) do
+    do_run(code, env, opts)
+  rescue
+    e -> {:error, {:raised, Exception.message(e)}}
+  end
+
+  defp do_run(code, env, opts) do
     timeout = Keyword.get(opts, :timeout, 30_000)
     report_pid = Keyword.get(opts, :report_pid)
     deno = System.find_executable("deno") || raise "deno not found on PATH"

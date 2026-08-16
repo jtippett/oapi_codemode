@@ -126,3 +126,33 @@ as absent (empty list / no body / no paths) instead of raising, and ingest
 still succeeds with the garbage field dropped.
 **Severity:** blocking
 **Resolved:** this commit
+
+## 2026-08-16 — gentility — Deno executor leaked a stray port message into the host's long-lived caller
+
+**What happened:** Discovered by the first real end-to-end test of
+`OapiCodemode.Executor.Deno` through gentility's `LoopServer` (every other
+oapi codemode test in that suite injects `Executor.Mock` instead — the
+Deno path had never actually run inside a host process before). `run/3`
+opened its `Port` on whatever process called it. `LoopServer` calls
+`Executor.run/3` synchronously from inside `handle_info` while dispatching
+a tool call, so the port — and its messages — belonged to the GenServer
+itself. The `{:exit_status, _}` message the OS sends when the `deno`
+child dies can arrive after the "done" line is already processed and
+`run/3` has returned (the child writes "done" to stdout and calls
+`Deno.exit(0)` back-to-back; the two notifications race independently).
+That straggler sat in the GenServer's mailbox and landed on the next
+unrelated `handle_info`, crashing the loop with a `FunctionClauseError` —
+100% of the time in practice, since by the time `run/3`'s `after` clause
+runs the child has usually already exited.
+**What the library should do differently:** Fixed — `run/3` now runs the
+whole port lifecycle inside a throwaway `Task.async/1`, so any message
+that outlives the run dies with that task's mailbox instead of leaking
+into the caller. `do_run/3` was made total (never raises) via a `safe_run/3`
+rescue wrapper specifically so `Task.await/2` always gets a normal return
+value rather than an EXIT — an EXIT from a crashed task is not
+`rescue`-able the way `OapiCodemode.Tools.run_sandbox/3` (and any other
+caller) expects an executor's raise to be. Regression test:
+`test/oapi_codemode/executor/deno_test.exs` — "no stray port messages leak
+into the calling process after run/3 returns".
+**Severity:** blocking
+**Resolved:** this commit

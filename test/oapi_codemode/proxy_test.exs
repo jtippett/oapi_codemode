@@ -7,14 +7,24 @@ defmodule OapiCodemode.ProxyTest do
   defmodule StaticResolver do
     @behaviour OapiCodemode.Credentials
     @impl true
-    def resolve("petstore", _scheme, %{token: token}), do: {:ok, {:bearer, token}}
-    def resolve(_, _, _), do: {:error, :no_credential}
+    def resolve("petstore", _scheme, _request, %{token: token}), do: {:ok, {:bearer, token}}
+    def resolve(_, _, _, _), do: {:error, :no_credential}
   end
 
   defmodule NoAuthResolver do
     @behaviour OapiCodemode.Credentials
     @impl true
-    def resolve(_api_name, _scheme, _context), do: {:ok, :none}
+    def resolve(_api_name, _scheme, _request, _context), do: {:ok, :none}
+  end
+
+  defmodule HostCheckingResolver do
+    @behaviour OapiCodemode.Credentials
+
+    def resolve(_api, _scheme, %{host: "petstore.example.com", method: "get"}, _ctx),
+      do: {:ok, {:bearer, "tok"}}
+
+    def resolve(_api, _scheme, request, _ctx),
+      do: {:error, "refused destination #{inspect(request)}"}
   end
 
   setup do
@@ -53,6 +63,23 @@ defmodule OapiCodemode.ProxyTest do
 
     assert resp.status == 200
     assert resp.body == %{"pets" => []}
+  end
+
+  test "credential resolver receives the request destination", %{entry: entry, ctx: ctx} do
+    Req.Test.stub(OapiCodemodeStub, fn conn ->
+      assert Plug.Conn.get_req_header(conn, "authorization") == ["Bearer tok"]
+      Req.Test.json(conn, %{})
+    end)
+
+    ctx = %{ctx | resolver: HostCheckingResolver}
+
+    assert {:ok, %{status: 200}} =
+             Proxy.request(
+               entry,
+               "petstore",
+               %{"method" => "GET", "path" => "/pets", "query" => %{"limit" => 1}},
+               ctx
+             )
   end
 
   test "path params substitute into the URL", %{entry: entry, ctx: ctx} do
@@ -315,19 +342,19 @@ defmodule OapiCodemode.ProxyTest do
     defmodule ExpiredResolver do
       @behaviour OapiCodemode.Credentials
       @impl true
-      def resolve(_, _, _), do: {:error, {:expired, "tok-SECRET"}}
+      def resolve(_, _, _, _), do: {:error, {:expired, "tok-SECRET"}}
     end
 
     defmodule MalformedSecretResolver do
       @behaviour OapiCodemode.Credentials
       @impl true
-      def resolve(_, _, _), do: {:ok, {:bearer, "tok-SECRET\n"}}
+      def resolve(_, _, _, _), do: {:ok, {:bearer, "tok-SECRET\n"}}
     end
 
     defmodule QueryKeyResolver do
       @behaviour OapiCodemode.Credentials
       @impl true
-      def resolve(_, _, _), do: {:ok, {:api_key, "sk-QUERY-SECRET"}}
+      def resolve(_, _, _, _), do: {:ok, {:api_key, "sk-QUERY-SECRET"}}
     end
 
     defp free_entry(operations, opts \\ []) do

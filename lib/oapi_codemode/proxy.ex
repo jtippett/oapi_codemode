@@ -130,7 +130,14 @@ defmodule OapiCodemode.Proxy do
   defp credentials(entry, api_name, op, ctx) do
     scheme = selected_scheme(entry, op)
 
-    with {:ok, credential} <- ctx.resolver.resolve(api_name, scheme, ctx.context),
+    request = %{
+      method: op.method,
+      base_url: entry.config.base_url,
+      host: URI.parse(entry.config.base_url).host,
+      path: op.path
+    }
+
+    with {:ok, credential} <- ctx.resolver.resolve(api_name, scheme, request, ctx.context),
          {:ok, auth} <- Credentials.attach(scheme, credential) do
       {:ok, auth}
     else

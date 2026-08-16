@@ -14,12 +14,24 @@ defmodule OapiCodemode.Credentials do
           | {:api_key, String.t()}
           | :none
 
+  @typedoc "Where the request is going, resolved before credential attachment."
+  @type request_info :: %{
+          method: String.t(),
+          base_url: String.t(),
+          host: String.t() | nil,
+          path: String.t()
+        }
+
   @doc """
   Resolve a credential for one request. `context` is the opaque identity map
   the host passed into the execute handler (tenant, user, org).
   """
-  @callback resolve(api_name :: String.t(), scheme :: map() | nil, context :: map()) ::
-              {:ok, credential()} | {:error, term()}
+  @callback resolve(
+              api_name :: String.t(),
+              scheme :: map() | nil,
+              request :: request_info(),
+              context :: map()
+            ) :: {:ok, credential()} | {:error, term()}
 
   # RFC 7230 token charset — what's legal in an HTTP header field name.
   @header_token_re ~r/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/

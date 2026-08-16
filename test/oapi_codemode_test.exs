@@ -62,6 +62,6 @@ defmodule OapiCodemodeTest do
   defmodule NoopResolver do
     @behaviour OapiCodemode.Credentials
     @impl true
-    def resolve(_, _, _), do: {:ok, :none}
+    def resolve(_, _, _, _), do: {:ok, :none}
   end
 end

@@ -37,8 +37,8 @@ defmodule OapiCodemode.EndToEndTest do
   defmodule Resolver do
     @behaviour OapiCodemode.Credentials
     @impl true
-    def resolve("petstore", _scheme, _ctx), do: {:ok, {:bearer, "e2e-token"}}
-    def resolve(_api, _scheme, _ctx), do: {:ok, :none}
+    def resolve("petstore", _scheme, _request, _ctx), do: {:ok, {:bearer, "e2e-token"}}
+    def resolve(_api, _scheme, _request, _ctx), do: {:ok, :none}
   end
 
   setup do

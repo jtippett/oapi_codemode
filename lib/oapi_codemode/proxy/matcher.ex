@@ -18,16 +18,30 @@ defmodule OapiCodemode.Proxy.Matcher do
 
     operations
     |> Enum.filter(&(&1.method == method))
-    |> Enum.find_value(fn op ->
+    |> Enum.flat_map(fn op ->
       case bind(op.segments, segments, %{}) do
-        {:ok, params} -> {:ok, op, params}
-        :error -> nil
+        {:ok, params} -> [{op, params}]
+        :error -> []
       end
     end)
+    |> Enum.sort_by(fn {op, _params} -> specificity(op) end)
     |> case do
-      {:ok, _, _} = hit -> hit
-      nil -> {:error, {:no_match, suggestions(operations, method, segments)}}
+      [{op, params} | _] -> {:ok, op, params}
+      [] -> {:error, {:no_match, suggestions(operations, method, segments)}}
     end
+  end
+
+  # Ranks candidates so first-match no longer depends on caller list order:
+  # fewer {:param, _} segments wins (a literal beats a template of the same
+  # shape); tie-break on the position of the first param — later wins,
+  # i.e. the route with the longer literal prefix.
+  defp specificity(op) do
+    param_count = Enum.count(op.segments, &match?({:param, _}, &1))
+
+    first_param_index =
+      Enum.find_index(op.segments, &match?({:param, _}, &1)) || length(op.segments)
+
+    {param_count, -first_param_index}
   end
 
   defp strip_query(path), do: path |> String.split("?", parts: 2) |> hd()

@@ -1,6 +1,6 @@
 defmodule OapiCodemode.ProxyTest do
   use ExUnit.Case, async: true
-  alias OapiCodemode.{Proxy, Ingest, ApiConfig, Fixtures}
+  alias OapiCodemode.{Proxy, Ingest, ApiConfig, Fixtures, Artifact, Operation}
   alias OapiCodemode.Registry.Entry
 
   defmodule StaticResolver do
@@ -8,6 +8,12 @@ defmodule OapiCodemode.ProxyTest do
     @impl true
     def resolve("petstore", _scheme, %{token: token}), do: {:ok, {:bearer, token}}
     def resolve(_, _, _), do: {:error, :no_credential}
+  end
+
+  defmodule NoAuthResolver do
+    @behaviour OapiCodemode.Credentials
+    @impl true
+    def resolve(_api_name, _scheme, _context), do: {:ok, :none}
   end
 
   setup do
@@ -154,5 +160,149 @@ defmodule OapiCodemode.ProxyTest do
 
     assert_receive {[:oapi_codemode, :request, :stop], ^ref, %{duration: _},
                     %{api: "petstore", operation: "listPets", status: 200}}
+  end
+
+  describe "custom-operation pipeline wiring (I3, I5, M9)" do
+    defp custom_entry(operations) do
+      artifact = %Artifact{spec: %{}, operations: operations, security_schemes: %{}}
+
+      %Entry{
+        artifact: artifact,
+        config: %ApiConfig{base_url: "https://api.example.com", validate: :strict}
+      }
+    end
+
+    defp noauth_ctx do
+      %{
+        resolver: NoAuthResolver,
+        context: %{},
+        policy: :all,
+        req_options: [plug: {Req.Test, OapiCodemodeStub}]
+      }
+    end
+
+    # I3: an unserializable query value (nested map, no deepObject style)
+    # must surface as a clean :validate-phase error, not crash the request
+    # pipeline inside Query.encode/1.
+    test "unserializable query param surfaces as a :validate-phase error" do
+      op = %Operation{
+        id: "op",
+        method: "get",
+        path: "/items",
+        segments: ["items"],
+        parameters: [
+          %{
+            "name" => "filter",
+            "in" => "query",
+            "required" => false,
+            "schema" => %{"type" => "object"}
+          }
+        ]
+      }
+
+      entry = custom_entry([op])
+
+      assert {:error, %{phase: :validate, message: msg}} =
+               Proxy.request(
+                 entry,
+                 "custom",
+                 %{
+                   "method" => "GET",
+                   "path" => "/items",
+                   "query" => %{"filter" => %{"a" => %{"b" => 1}}}
+                 },
+                 noauth_ctx()
+               )
+
+      assert msg =~ "filter"
+    end
+
+    # I5: a path param bound by the matcher is now validated against its
+    # schema; a bad value rejects before any HTTP call.
+    test "invalid path param surfaces as a :validate-phase error" do
+      op = %Operation{
+        id: "op",
+        method: "get",
+        path: "/items/{id}",
+        segments: ["items", {:param, "id"}],
+        parameters: [
+          %{
+            "name" => "id",
+            "in" => "path",
+            "required" => true,
+            "schema" => %{"type" => "integer"}
+          }
+        ]
+      }
+
+      entry = custom_entry([op])
+
+      assert {:error, %{phase: :validate, message: msg}} =
+               Proxy.request(
+                 entry,
+                 "custom",
+                 %{"method" => "GET", "path" => "/items/abc"},
+                 noauth_ctx()
+               )
+
+      assert msg =~ "id"
+      assert msg =~ "integer"
+    end
+
+    # M9: a path param value is RFC 3986 path-segment encoded, not
+    # www-form encoded — a space becomes "%20" (not "+").
+    test "path param with a space is percent-encoded, not plus-encoded" do
+      op = %Operation{
+        id: "op",
+        method: "get",
+        path: "/items/{code}",
+        segments: ["items", {:param, "code"}],
+        parameters: [%{"name" => "code", "in" => "path", "required" => true, "schema" => %{}}]
+      }
+
+      entry = custom_entry([op])
+
+      Req.Test.stub(OapiCodemodeStub, fn conn ->
+        assert conn.request_path == "/items/a%20b"
+        Req.Test.json(conn, %{})
+      end)
+
+      assert {:ok, %{status: 200}} =
+               Proxy.request(
+                 entry,
+                 "custom",
+                 %{"method" => "GET", "path" => "/items/a b"},
+                 noauth_ctx()
+               )
+    end
+
+    # M9: a path param value that carries an already-percent-encoded slash
+    # (a literal "%2F"/".." traversal attempt smuggled in as segment text)
+    # must not be decoded into an extra path segment — it stays as one
+    # inert, double-escaped segment on the wire.
+    test "a percent-encoded traversal attempt inside a path param stays neutralized" do
+      op = %Operation{
+        id: "op",
+        method: "get",
+        path: "/items/{code}",
+        segments: ["items", {:param, "code"}],
+        parameters: [%{"name" => "code", "in" => "path", "required" => true, "schema" => %{}}]
+      }
+
+      entry = custom_entry([op])
+
+      Req.Test.stub(OapiCodemodeStub, fn conn ->
+        assert conn.request_path == "/items/..%252f..%252fetc%252fpasswd"
+        Req.Test.json(conn, %{})
+      end)
+
+      assert {:ok, %{status: 200}} =
+               Proxy.request(
+                 entry,
+                 "custom",
+                 %{"method" => "GET", "path" => "/items/..%2f..%2fetc%2fpasswd"},
+                 noauth_ctx()
+               )
+    end
   end
 end

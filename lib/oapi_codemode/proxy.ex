@@ -39,7 +39,7 @@ defmodule OapiCodemode.Proxy do
     result =
       with {:ok, op, path_params} <- match(entry, method, path),
            :ok <- policy(ctx.policy, op.method),
-           :ok <- validate(entry.config, op, query, body),
+           :ok <- validate(entry.config, op, query, body, path_params),
            {:ok, auth} <- credentials(entry, api_name, op, ctx),
            {:ok, resp} <- execute(entry.config, op, path_params, query, body, auth, opts, ctx) do
         {:ok, resp, op}
@@ -101,10 +101,10 @@ defmodule OapiCodemode.Proxy do
              "Use the mutations variant of the execute tool."
        }}
 
-  defp validate(%ApiConfig{validate: :off}, _op, _query, _body), do: :ok
+  defp validate(%ApiConfig{validate: :off}, _op, _query, _body, _path_params), do: :ok
 
-  defp validate(%ApiConfig{validate: mode}, op, query, body) do
-    case Validator.validate(op, %{query: query, body: body}) do
+  defp validate(%ApiConfig{validate: mode}, op, query, body, path_params) do
+    case Validator.validate(op, %{query: query, body: body, path_params: path_params}) do
       :ok ->
         :ok
 
@@ -148,9 +148,48 @@ defmodule OapiCodemode.Proxy do
   end
 
   defp execute(config, op, path_params, query, body, auth, opts, ctx) do
-    url = build_url(config.base_url, op, path_params)
+    with {:ok, query_string} <- build_query_string(op, query, auth) do
+      url = build_url(config.base_url, op, path_params)
+      full_url = if query_string == "", do: url, else: url <> "?" <> query_string
 
-    query_string =
+      {req_body, content_type} = encode_body(body, opts)
+
+      headers =
+        auth.headers ++ if content_type, do: [{"content-type", content_type}], else: []
+
+      req =
+        Req.new(
+          [
+            method: http_method(op.method),
+            url: full_url,
+            headers: headers,
+            body: req_body,
+            retry: false,
+            max_retries: 0
+          ] ++ ctx.req_options
+        )
+
+      case Req.request(req) do
+        {:ok, resp} ->
+          {:ok,
+           %{
+             status: resp.status,
+             headers: whitelist_headers(resp.headers),
+             body: cap_body(resp.body, config.max_response_bytes)
+           }}
+
+        {:error, err} ->
+          {:error, %{phase: :transport, message: "request failed: #{Exception.message(err)}"}}
+      end
+    end
+  end
+
+  # I3: query params that can't be serialized (e.g. a nested map/list without
+  # a style that knows how to flatten it) surface as a :validate-phase error
+  # — this is a request-shape problem the caller can fix, not a transport
+  # failure.
+  defp build_query_string(op, query, auth) do
+    pairs =
       op.parameters
       |> Enum.filter(&(&1["in"] == "query"))
       |> Enum.flat_map(fn p ->
@@ -161,38 +200,10 @@ defmodule OapiCodemode.Proxy do
       end)
       |> Kernel.++(extra_query(query, op))
       |> Kernel.++(Enum.map(auth.query, fn {k, v} -> {k, v, %{}} end))
-      |> Query.encode()
 
-    full_url = if query_string == "", do: url, else: url <> "?" <> query_string
-
-    {req_body, content_type} = encode_body(body, opts)
-
-    headers =
-      auth.headers ++ if content_type, do: [{"content-type", content_type}], else: []
-
-    req =
-      Req.new(
-        [
-          method: http_method(op.method),
-          url: full_url,
-          headers: headers,
-          body: req_body,
-          retry: false,
-          max_retries: 0
-        ] ++ ctx.req_options
-      )
-
-    case Req.request(req) do
-      {:ok, resp} ->
-        {:ok,
-         %{
-           status: resp.status,
-           headers: whitelist_headers(resp.headers),
-           body: cap_body(resp.body, config.max_response_bytes)
-         }}
-
-      {:error, err} ->
-        {:error, %{phase: :transport, message: "request failed: #{Exception.message(err)}"}}
+    case Query.encode(pairs) do
+      {:ok, qs} -> {:ok, qs}
+      {:error, message} -> {:error, %{phase: :validate, message: message}}
     end
   end
 
@@ -211,8 +222,15 @@ defmodule OapiCodemode.Proxy do
   defp build_url(base_url, op, path_params) do
     path =
       Enum.map_join(op.segments, "/", fn
-        {:param, name} -> path_params |> Map.fetch!(name) |> to_string() |> URI.encode_www_form()
-        seg -> seg
+        # M9: RFC 3986 path-segment percent-encoding, not www-form encoding
+        # — a space must become "%20" (not "+", which is meaningless in a
+        # path) and any literal "/" in the value must become "%2F" so it
+        # can't smuggle an extra path segment (traversal) into the URL.
+        {:param, name} ->
+          path_params |> Map.fetch!(name) |> to_string() |> URI.encode(&URI.char_unreserved?/1)
+
+        seg ->
+          seg
       end)
 
     String.trim_trailing(base_url, "/") <> "/" <> path

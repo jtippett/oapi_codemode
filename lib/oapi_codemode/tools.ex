@@ -11,6 +11,8 @@ defmodule OapiCodemode.Tools do
     * `:policy` — :read_only (default) or :all
     * `:max_result_tokens` — default 6000
     * `:timeout` — sandbox timeout ms, default 30_000
+    * `:search_tool_name` — default "search_apis". Set a distinct name when a
+      host emits per-API-instance tools.
     * `:execute_tool_name` — default "execute_api_code". A host that wants a
       separate mutating tool alongside the read-only one calls `definitions/1`
       twice: once with the defaults (search + read-only execute), once with
@@ -67,6 +69,7 @@ defmodule OapiCodemode.Tools do
   def definitions(opts) do
     entries = Registry.list(Keyword.fetch!(opts, :registry))
     policy = Keyword.get(opts, :policy, :read_only)
+    search_tool_name = Keyword.get(opts, :search_tool_name, "search_apis")
     execute_tool_name = Keyword.get(opts, :execute_tool_name, "execute_api_code")
     include_search = Keyword.get(opts, :include_search, true)
 
@@ -74,7 +77,7 @@ defmodule OapiCodemode.Tools do
       if include_search do
         [
           %{
-            name: "search_apis",
+            name: search_tool_name,
             description: Descriptions.search(entries),
             input_schema: @code_schema,
             handler: fn args, host_ctx -> search(args, host_ctx, opts) end

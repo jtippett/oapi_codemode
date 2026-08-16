@@ -354,6 +354,17 @@ defmodule OapiCodemode.ToolsTest do
       assert ["execute_api_code", "search_apis"] = defs |> Enum.map(& &1.name) |> Enum.sort()
     end
 
+    test "search tool name is configurable and defaults to search_apis", %{opts: opts} do
+      custom_names =
+        opts
+        |> Keyword.put(:search_tool_name, "x_api_search")
+        |> Tools.definitions()
+        |> Enum.map(& &1.name)
+
+      assert "x_api_search" in custom_names
+      assert "search_apis" in Enum.map(Tools.definitions(opts), & &1.name)
+    end
+
     test "a second definitions call with a custom execute_tool_name and no search yields exactly one tool",
          %{opts: opts} do
       mutating_opts =

@@ -76,4 +76,75 @@ defmodule OapiCodemode.Ingest.NormalizeTest do
     ops = Normalize.operations(spec)
     assert Enum.map(ops, & &1.id) |> Enum.sort() == ["dup", "dup_2"]
   end
+
+  # Specs in the wild are dirty (tenant-uploaded, not authored by us): a
+  # field with the wrong JSON shape must never crash ingest. Policy is
+  # lenient-ignore, same as the existing `info_map` handling in Ingest —
+  # a malformed value is treated as absent, not as an error.
+  describe "malformed spec shapes are ignored, not raised" do
+    test "path-level parameters that isn't a list is ignored" do
+      spec = %{
+        "openapi" => "3.1.0",
+        "paths" => %{
+          "/things" => %{
+            "parameters" => "nope",
+            "get" => %{"responses" => %{}}
+          }
+        }
+      }
+
+      assert [op] = Normalize.operations(spec)
+      assert op.parameters == []
+    end
+
+    test "operation-level parameters that isn't a list is ignored" do
+      spec = %{
+        "openapi" => "3.1.0",
+        "paths" => %{
+          "/things" => %{
+            "get" => %{"responses" => %{}, "parameters" => "nope"}
+          }
+        }
+      }
+
+      assert [op] = Normalize.operations(spec)
+      assert op.parameters == []
+    end
+
+    test "operation tags that isn't a list is ignored" do
+      spec = %{
+        "openapi" => "3.1.0",
+        "paths" => %{
+          "/things" => %{
+            "get" => %{"responses" => %{}, "tags" => "nope"}
+          }
+        }
+      }
+
+      assert [op] = Normalize.operations(spec)
+      assert op.tags == []
+    end
+
+    test "requestBody.content that isn't a map is ignored (no body)" do
+      spec = %{
+        "openapi" => "3.1.0",
+        "paths" => %{
+          "/things" => %{
+            "get" => %{"responses" => %{}, "requestBody" => %{"content" => "nope"}}
+          }
+        }
+      }
+
+      assert [op] = Normalize.operations(spec)
+      assert op.request_body == nil
+    end
+
+    test "top-level paths that isn't a map is ignored (no operations)" do
+      assert Normalize.operations(%{"openapi" => "3.1.0", "paths" => "nope"}) == []
+    end
+
+    test "top-level paths that is a list is ignored (no operations)" do
+      assert Normalize.operations(%{"openapi" => "3.1.0", "paths" => ["nope"]}) == []
+    end
+  end
 end

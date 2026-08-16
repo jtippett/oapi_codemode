@@ -106,3 +106,23 @@ per-looper scoping; note in `ele.md`'s generic guidance that registry scope
 should follow the host's tool-authorization grain, not tenancy grain.
 **Severity:** cosmetic (doc fix)
 **Resolved:** docs update, this commit
+
+## 2026-08-16 — gentility — ingest is not total over malformed specs
+
+**What happened:** Reviewer-reported: gentility stores tenant-uploaded
+OpenAPI specs, so `OapiCodemode.ingest/1` must be total — it must return
+`{:error, _}` for any malformed shape, never raise. It raised
+`Protocol.UndefinedError` on a plausible-but-malformed spec: a path item
+with `"parameters" => "nope"` (non-list), or an operation with
+`"tags" => "nope"` (non-list). Auditing `Normalize` for the same pattern
+(`Enum`/`MapSet` over a spec-supplied value with no list guard) turned up
+three more live crash sites in the same module: top-level `paths` being a
+non-map/list, `requestBody.content` being a non-map, and operation-level
+`parameters` being non-list (distinct from the path-level case above).
+**What the library should do differently:** Fixed rather than deferred —
+`Normalize` now applies the same lenient-ignore policy already established
+for `info` in `Ingest.info_map/1`: a field with the wrong shape is treated
+as absent (empty list / no body / no paths) instead of raising, and ingest
+still succeeds with the garbage field dropped.
+**Severity:** blocking
+**Resolved:** this commit

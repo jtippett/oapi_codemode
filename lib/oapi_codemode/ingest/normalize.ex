@@ -23,13 +23,21 @@ defmodule OapiCodemode.Ingest.Normalize do
   def operations(spec) do
     spec
     |> Map.get("paths", %{})
+    |> paths_map()
     |> Enum.sort_by(fn {path, _} -> path end)
     |> Enum.flat_map(fn {path, item} -> path_operations(path, item, spec) end)
     |> dedupe_ids()
   end
 
+  # Specs in the wild are dirty (tenant-uploaded, not authored by us):
+  # `paths` itself can be the wrong shape (a string, a list, ...). Ingest
+  # must be total, so a malformed `paths` is treated as "no paths" rather
+  # than raising — same lenient-ignore policy as `info_map` in Ingest.
+  defp paths_map(paths) when is_map(paths), do: paths
+  defp paths_map(_), do: %{}
+
   defp path_operations(path, item, spec) when is_map(item) do
-    path_level_params = Map.get(item, "parameters", [])
+    path_level_params = list_or_empty(Map.get(item, "parameters", []))
 
     for method <- @methods, op = item[method], is_map(op) do
       %Operation{
@@ -38,8 +46,9 @@ defmodule OapiCodemode.Ingest.Normalize do
         path: path,
         segments: parse_segments(path),
         summary: op["summary"] || op["description"],
-        tags: op["tags"] || [],
-        parameters: merge_parameters(path_level_params, Map.get(op, "parameters", [])),
+        tags: list_or_empty(op["tags"]),
+        parameters:
+          merge_parameters(path_level_params, list_or_empty(Map.get(op, "parameters", []))),
         request_body: extract_body(op["requestBody"]),
         security: op["security"] || spec["security"]
       }
@@ -47,6 +56,14 @@ defmodule OapiCodemode.Ingest.Normalize do
   end
 
   defp path_operations(_path, _item, _spec), do: []
+
+  # Lenient-ignore policy (see `paths_map/1` above): a `parameters` or
+  # `tags` field that isn't a list is dropped rather than raising. This is
+  # the same policy applied consistently across the module — malformed
+  # fields are ignored, never fatal, so tenant-uploaded specs can never
+  # crash ingest.
+  defp list_or_empty(list) when is_list(list), do: list
+  defp list_or_empty(_), do: []
 
   # OpenAPI 3.x semantics: an operation-level parameter with the same
   # (name, in) pair overrides the path-level parameter rather than
@@ -87,7 +104,11 @@ defmodule OapiCodemode.Ingest.Normalize do
 
   defp extract_body(nil), do: nil
 
-  defp extract_body(%{"content" => content} = body) do
+  # `content` must be a map (media-type -> media object) per the OpenAPI
+  # spec; a malformed non-map `content` is treated as no body at all
+  # rather than raising (same lenient-ignore policy as the rest of the
+  # module).
+  defp extract_body(%{"content" => content} = body) when is_map(content) do
     fallback = Enum.at(content, 0, {nil, %{}})
 
     {content_type, media} =

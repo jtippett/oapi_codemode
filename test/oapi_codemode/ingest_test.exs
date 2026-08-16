@@ -36,4 +36,40 @@ defmodule OapiCodemode.IngestTest do
     assert {:ok, %Artifact{}} =
              Ingest.ingest(~s({"openapi":"3.1.0","paths":{},"info":"oops"}))
   end
+
+  # Reviewer-reported: tenant-uploaded specs with plausible-but-malformed
+  # shapes must never raise. Policy is lenient-ignore (see FEEDBACK.md
+  # entry for this fix): the garbage field is dropped, ingest still
+  # succeeds.
+  test "tolerates a path item with non-list parameters instead of raising" do
+    raw =
+      Jason.encode!(%{
+        "openapi" => "3.1.0",
+        "paths" => %{
+          "/things" => %{
+            "parameters" => "nope",
+            "get" => %{"responses" => %{}}
+          }
+        }
+      })
+
+    assert {:ok, %Artifact{operations: [op]}} = Ingest.ingest(raw)
+    assert op.parameters == []
+  end
+
+  test "tolerates an operation with non-list tags instead of raising" do
+    raw =
+      Jason.encode!(%{
+        "openapi" => "3.1.0",
+        "paths" => %{
+          "/things" => %{
+            "get" => %{"responses" => %{}, "tags" => "nope"}
+          }
+        }
+      })
+
+    assert {:ok, %Artifact{operations: [op], tags: tags}} = Ingest.ingest(raw)
+    assert op.tags == []
+    assert tags == []
+  end
 end

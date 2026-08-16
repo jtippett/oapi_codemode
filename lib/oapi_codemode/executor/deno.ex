@@ -7,8 +7,17 @@ defmodule OapiCodemode.Executor.Deno do
   exactly that pid on timeout — never a pattern).
 
   Sandboxing: deno runs with --no-prompt and NO permission flags, so the
-  child has no network, no file, no env access. Callbacks are its only
-  door out.
+  child has no `fetch`/TCP network access, no filesystem access, no env
+  access, and cannot spawn subprocesses. On its own that is not
+  "no network": Deno 2's default *import* allowlist lets `import()` of
+  `https:`/`npm:`/`jsr:` specifiers reach the network to fetch the module
+  even without `--allow-net` (the module loader is a separate permission
+  domain from `fetch`). We additionally pass `--no-remote` and `--no-npm`
+  to close that door — they disable remote (http/https/jsr) and npm module
+  resolution outright, so no permission grant could re-open it later
+  either. The `data:text/typescript` bootstrap import that loads the
+  sandboxed code itself is unaffected (`data:` is a local scheme, not
+  remote/npm). Callbacks are the sandbox's only door out.
 
   Residual risk (protocol injection): `bootstrap.ts` patches `console.log`
   and, once the sandboxed code starts running, attempts to lock down
@@ -36,7 +45,7 @@ defmodule OapiCodemode.Executor.Deno do
         :binary,
         :exit_status,
         :hide,
-        args: ["run", "--no-prompt", "--quiet", @bootstrap]
+        args: ["run", "--no-prompt", "--quiet", "--no-remote", "--no-npm", @bootstrap]
       ])
 
     os_pid = port |> Port.info(:os_pid) |> elem(1)

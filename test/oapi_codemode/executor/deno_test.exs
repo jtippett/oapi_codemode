@@ -161,6 +161,35 @@ defmodule OapiCodemode.Executor.DenoTest do
              Deno.run(code, %{globals: %{}, callbacks: %{}}, timeout: 10_000)
   end
 
+  # Deno 2's default import allowlist permits dynamic https:/npm:/jsr:
+  # imports WITHOUT --allow-net (network permission only gates `fetch`/TCP,
+  # not the module loader). --no-remote/--no-npm close that door; these
+  # cases prove all three remote import schemes are blocked from inside the
+  # sandbox, not just plain fetch.
+  test "dynamic import of a remote https module is blocked" do
+    code =
+      ~s|async () => { try { await import("https://esm.sh/left-pad@1.3.0"); return "imported"; } catch (e) { return "blocked"; } }|
+
+    assert {:ok, %{value: "blocked"}} =
+             Deno.run(code, %{globals: %{}, callbacks: %{}}, timeout: 10_000)
+  end
+
+  test "dynamic import of an npm module is blocked" do
+    code =
+      ~s|async () => { try { await import("npm:left-pad"); return "imported"; } catch (e) { return "blocked"; } }|
+
+    assert {:ok, %{value: "blocked"}} =
+             Deno.run(code, %{globals: %{}, callbacks: %{}}, timeout: 10_000)
+  end
+
+  test "dynamic import of a jsr module is blocked" do
+    code =
+      ~s|async () => { try { await import("jsr:@std/streams"); return "imported"; } catch (e) { return "blocked"; } }|
+
+    assert {:ok, %{value: "blocked"}} =
+             Deno.run(code, %{globals: %{}, callbacks: %{}}, timeout: 10_000)
+  end
+
   # Polls `ps -p <pid>` for up to ~1s (SIGKILL delivery is not instantaneous)
   # instead of sleeping a fixed amount. The pid targeted is the exact one
   # recorded at spawn time via `report_pid` — never a name-based match.

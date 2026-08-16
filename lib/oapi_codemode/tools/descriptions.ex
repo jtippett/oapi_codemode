@@ -126,10 +126,10 @@ defmodule OapiCodemode.Tools.Descriptions do
 
   defp tags(tags), do: Enum.join(tags, ", ")
 
-  # Only declared when some API actually has context — an empty `context`
-  # global is not injected, so declaring it would be a lie.
+  # Only declared when some API actually has sandbox globals — an empty
+  # `context` global is not injected, so declaring it would be a lie.
   defp context_declaration(entries) do
-    if Enum.any?(entries, fn {_, e} -> map_size(e.config.context) > 0 end) do
+    if Enum.any?(entries, fn {_, e} -> map_size(e.config.sandbox_globals) > 0 end) do
       "declare const context: Record<string, Record<string, unknown>>;"
     else
       ""
@@ -142,8 +142,8 @@ defmodule OapiCodemode.Tools.Descriptions do
   defp context_globals(entries) do
     lines =
       for {name, entry} <- entries,
-          map_size(entry.config.context) > 0,
-          {key, value} <- Enum.sort(entry.config.context) do
+          map_size(entry.config.sandbox_globals) > 0,
+          {key, value} <- Enum.sort(entry.config.sandbox_globals) do
         "  context.#{name}.#{key} = #{Jason.encode!(value)}"
       end
 

@@ -38,7 +38,7 @@ search-and-execute style:
 # registration (boot): name must match ^[A-Za-z_][A-Za-z0-9_]*$ (JS identifier)
 OapiCodemode.ingest_and_register(Ele.OapiRegistry, "stripe", File.read!(path),
   base_url: "https://api.stripe.com",   # optional if the spec's servers[] is right
-  context: %{"accountId" => "..."}      # optional, becomes sandbox globals
+  sandbox_globals: %{"accountId" => "..."} # optional; JS receives context.stripe.accountId
 )
 
 # tool emission:

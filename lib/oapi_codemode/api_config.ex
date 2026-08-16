@@ -4,8 +4,8 @@ defmodule OapiCodemode.ApiConfig do
   defstruct base_url: nil,
             # name of a securityScheme in the spec, an inline scheme map, or nil (first in spec)
             security_scheme: nil,
-            # values injected as sandbox globals for this API (e.g. account ids)
-            context: %{},
+            # model-visible values injected as sandbox globals for this API (e.g. account ids)
+            sandbox_globals: %{},
             validate: :strict,
             # max upstream response body bytes surfaced to the sandbox
             max_response_bytes: 200_000,

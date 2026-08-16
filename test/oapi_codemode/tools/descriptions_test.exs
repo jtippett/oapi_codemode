@@ -6,7 +6,12 @@ defmodule OapiCodemode.Tools.DescriptionsTest do
   setup do
     reg = start_supervised!({Registry, name: nil})
     {:ok, art} = Ingest.ingest(Fixtures.clean_3_1())
-    :ok = Registry.register(reg, "petstore", art, %ApiConfig{context: %{"storeId" => "s1"}})
+
+    :ok =
+      Registry.register(reg, "petstore", art, %ApiConfig{
+        sandbox_globals: %{"storeId" => "s1"}
+      })
+
     %{reg: reg, art: art}
   end
 

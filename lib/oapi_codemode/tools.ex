@@ -28,7 +28,9 @@ defmodule OapiCodemode.Tools do
 
   Handler contract: `handler.(args, host_ctx) -> {:ok, json_string} | {:error, message}`.
   `host_ctx` may carry `:context` (opaque identity for the credential
-  resolver) and `:req_options` (extra Req options, e.g. Req.Test plugs).
+  resolver, never exposed to the sandbox) and `:req_options` (extra Req
+  options, e.g. Req.Test plugs). Per-API model-visible values belong in
+  `ApiConfig.sandbox_globals` instead.
 
   M6: the descriptions are a snapshot of registry state at the moment
   `definitions/1` is called. A host that registers, re-registers, or
@@ -281,8 +283,8 @@ defmodule OapiCodemode.Tools do
 
   defp context_globals(entries) do
     contexts =
-      for {name, entry} <- entries, map_size(entry.config.context) > 0, into: %{} do
-        {name, entry.config.context}
+      for {name, entry} <- entries, map_size(entry.config.sandbox_globals) > 0, into: %{} do
+        {name, entry.config.sandbox_globals}
       end
 
     if map_size(contexts) > 0, do: %{"context" => contexts}, else: %{}

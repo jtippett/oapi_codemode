@@ -263,11 +263,13 @@ defmodule OapiCodemode.ToolsTest do
     end
 
     # M9: the globals the execute description declares must really arrive.
-    test "context and apiNames globals reach the sandbox", %{reg: reg, opts: opts} do
+    test "sandbox_globals and apiNames reach the sandbox", %{reg: reg, opts: opts} do
       {:ok, art} = Ingest.ingest(Fixtures.clean_3_1())
 
       :ok =
-        Registry.register(reg, "petstore", art, %ApiConfig{context: %{"storeId" => "s1"}})
+        Registry.register(reg, "petstore", art, %ApiConfig{
+          sandbox_globals: %{"storeId" => "s1"}
+        })
 
       Mock.set_response(fn _code, env ->
         assert env.globals["apiNames"] == ["petstore"]

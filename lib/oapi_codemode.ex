@@ -12,11 +12,33 @@ defmodule OapiCodemode do
 
   alias OapiCodemode.{ApiConfig, Ingest, Registry, Tools}
 
-  @doc "Ingest a raw spec and register it in one call."
+  @doc """
+  Ingest a raw spec and register it in one call.
+
+  Returns `{:error, {:invalid_config_option, key}}` rather than raising when
+  `config_opts` contains a key `ApiConfig` doesn't define (e.g. a typo'd
+  option name) — a host building config from user/config-file input gets a
+  value it can act on instead of a `KeyError` crash.
+  """
   def ingest_and_register(registry, name, raw_spec, config_opts \\ []) do
-    with {:ok, artifact} <- Ingest.ingest(raw_spec) do
-      Registry.register(registry, name, artifact, struct!(ApiConfig, config_opts))
+    with {:ok, config} <- build_config(config_opts),
+         {:ok, artifact} <- Ingest.ingest(raw_spec) do
+      Registry.register(registry, name, artifact, config)
     end
+  end
+
+  defp build_config(config_opts) do
+    {:ok, struct!(ApiConfig, config_opts)}
+  rescue
+    KeyError -> {:error, {:invalid_config_option, first_unknown_key(config_opts)}}
+  end
+
+  defp first_unknown_key(config_opts) do
+    known = ApiConfig.__struct__() |> Map.from_struct() |> Map.keys() |> MapSet.new()
+
+    config_opts
+    |> Keyword.keys()
+    |> Enum.find(&(&1 not in known))
   end
 
   @doc "Emit the search/execute tool definitions. See `OapiCodemode.Tools.definitions/1`."

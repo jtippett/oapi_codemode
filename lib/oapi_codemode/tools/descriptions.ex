@@ -59,9 +59,17 @@ defmodule OapiCodemode.Tools.Descriptions do
     """
   end
 
-  @doc "Description for the `execute_api_code` tool, given `Registry.list/1` output."
-  @spec execute([{String.t(), struct()}]) :: String.t()
-  def execute(entries) do
+  @doc """
+  Description for the execute tool, given `Registry.list/1` output.
+
+  `policy` is `:read_only` (default) or `:all`. Under `:all` an extra
+  paragraph is appended stating that mutating requests are allowed — a host
+  that registers a second, mutating tool variant (via `Tools.definitions/1`
+  with `policy: :all` and a distinct `:execute_tool_name`) must not leave
+  the model to assume the read-only default's restrictions still apply.
+  """
+  @spec execute([{String.t(), struct()}], :read_only | :all) :: String.t()
+  def execute(entries, policy \\ :read_only) do
     """
     Execute JavaScript that calls the registered APIs. First use the search
     tool to find the right operations, then call apis.<name>.request().
@@ -93,8 +101,18 @@ defmodule OapiCodemode.Tools.Descriptions do
       const r = await apis.petstore.request({ method: "GET", path: "/pets", query: { limit: 10 } });
       return r.body;
     }
+    #{policy_paragraph(policy)}
     """
   end
+
+  defp policy_paragraph(:all) do
+    "\nMutating requests are allowed with this tool: POST, PUT, PATCH, and " <>
+      "DELETE requests are permitted in addition to GET, and will be sent " <>
+      "to the live API. Use this tool only when the user's request actually " <>
+      "requires creating, changing, or deleting data."
+  end
+
+  defp policy_paragraph(_read_only), do: ""
 
   defp api_line({name, entry}) do
     title = entry.artifact.title || name

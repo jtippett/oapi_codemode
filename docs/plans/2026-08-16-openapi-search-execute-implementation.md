@@ -3060,3 +3060,15 @@ they differ. Do not re-execute tasks from this file without these corrections:
 
 Deferred, tracked: search-globals encode caching (~4MB / ~122ms per search
 call with the X fixture registered).
+
+Deferred, tracked (2026-08-16 ship-gate pass): per-call API allowlist from
+host context (design §5 step 3 — gentility's `net_allowed_urls` pattern;
+policy today is all-or-nothing per execute-handler invocation via
+`:read_only`/`:all`, not scoped to a subset of registered APIs per call).
+`Registry.list` artifact-copy + search-globals caching (I3 — every
+`search_apis`/`execute_api_code` call currently re-copies and re-encodes
+each registered API's full spec/artifact from the registry; worth caching
+once specs stop changing per-call). Property tests for matcher specificity
+(`OapiCodemode.Proxy.Matcher` candidate ranking under generated path sets)
+and ID normalization (`OapiCodemode.Ingest` operationId/name coercion)
+beyond the example-based unit tests already in place.

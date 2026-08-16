@@ -103,8 +103,11 @@ defmodule OapiCodemode.Executor.Deno do
       {:ok, %{"type" => "done", "ok" => %{"value" => value, "logs" => logs}}} ->
         {:done, {:ok, %{value: value, logs: logs}}}
 
+      {:ok, %{"type" => "done", "error" => error, "logs" => logs}} ->
+        {:done, {:error, %{message: error, logs: logs}}}
+
       {:ok, %{"type" => "done", "error" => error}} ->
-        {:done, {:error, error}}
+        {:done, {:error, %{message: error, logs: []}}}
 
       {:ok, %{"type" => "callback", "id" => id, "name" => name, "args" => args}} ->
         dispatch_callback(id, name, args, callbacks)
@@ -143,9 +146,13 @@ defmodule OapiCodemode.Executor.Deno do
   defp reply_msg(id, {:error, message}), do: %{type: "callback_result", id: id, error: message}
 
   defp close_port(port, os_pid) do
-    if Port.info(port), do: Port.close(port)
-    # Kill exactly the pid we spawned (recorded above) — never a pattern.
+    # Kill exactly the pid we spawned (recorded above) — never a pattern —
+    # BEFORE closing the port. Port.close reaps the OS child asynchronously;
+    # closing first would free up that pid for the OS to reuse while our
+    # kill -9 is still in flight, risking a signal landing on an unrelated
+    # process that raced into the freed pid.
     System.cmd("kill", ["-9", Integer.to_string(os_pid)], stderr_to_stdout: true)
+    if Port.info(port), do: Port.close(port)
   catch
     _, _ -> :ok
   end

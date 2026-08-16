@@ -12,6 +12,20 @@ defmodule OapiCodemodeTest do
     assert {:ok, _} = OapiCodemode.Registry.lookup(reg, "petstore")
   end
 
+  # A typo'd config key (e.g. `bas_url` instead of `base_url`) used to raise
+  # a KeyError out of struct!/2 straight into the caller — a host wiring up
+  # config from user input gets a crash instead of a value it can act on.
+  test "ingest_and_register returns an error tuple for an unknown config option" do
+    reg = start_supervised!({OapiCodemode.Registry, name: nil})
+
+    assert {:error, {:invalid_config_option, :bas_url}} =
+             OapiCodemode.ingest_and_register(reg, "petstore", OapiCodemode.Fixtures.clean_3_1(),
+               bas_url: "https://petstore.example.com/v1"
+             )
+
+    assert {:error, :unknown_api} = OapiCodemode.Registry.lookup(reg, "petstore")
+  end
+
   test "tools/1 delegates to Tools.definitions" do
     reg = start_supervised!({OapiCodemode.Registry, name: nil})
 

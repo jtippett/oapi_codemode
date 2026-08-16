@@ -133,38 +133,88 @@ defmodule OapiCodemode.ToolsTest do
     # path — every failing execute leaked a process into the host's caller
     # (20 leaked over the suite), and a late Agent crash would have taken the
     # host process with it.
-    test "an executor that raises leaks no processes and returns an error", %{opts: opts} do
+    test "an executor that raises leaks no processes and surfaces the error as data", %{
+      opts: opts
+    } do
       execute = Tools.definitions(opts) |> Enum.find(&(&1.name == "execute_api_code"))
       {:links, before} = Process.info(self(), :links)
 
       Mock.set_response(fn _c, _e -> raise "boom inside the sandbox" end)
 
-      assert {:error, msg} = execute.handler.(%{"code" => "async () => 1"}, %{})
-      assert msg =~ "sandbox error"
-      assert msg =~ "boom inside the sandbox"
+      assert {:ok, result} = execute.handler.(%{"code" => "async () => 1"}, %{})
+      decoded = Jason.decode!(result)
+      assert decoded["calls"] == []
+      assert decoded["logs"] == []
+      assert decoded["error"] =~ "sandbox error"
+      assert decoded["error"] =~ "boom inside the sandbox"
+      refute Map.has_key?(decoded, "result")
 
       {:links, later} = Process.info(self(), :links)
       assert later == before
     end
 
-    test "an executor error still leaves no linked processes behind", %{opts: opts} do
+    # I1: on sandbox error/timeout the call metadata (and any calls already
+    # made before the crash) must still reach the caller — mutations may
+    # have landed even though the run ultimately failed.
+    test "an executor error still leaves no linked processes behind and reports calls made before the crash",
+         %{opts: opts} do
+      Req.Test.stub(ErrorPathStub, fn conn -> Req.Test.json(conn, %{"pets" => []}) end)
+
       execute = Tools.definitions(opts) |> Enum.find(&(&1.name == "execute_api_code"))
       {:links, before} = Process.info(self(), :links)
 
-      Mock.set_response(fn _c, _e -> {:error, "ReferenceError"} end)
-      assert {:error, _} = execute.handler.(%{"code" => "async () => 1"}, %{})
+      Mock.set_response(fn _code, env ->
+        env.callbacks.request.("petstore", %{
+          "method" => "GET",
+          "path" => "/pets",
+          "query" => %{"limit" => 1}
+        })
+
+        {:error, "ReferenceError"}
+      end)
+
+      assert {:ok, result} =
+               execute.handler.(%{"code" => "async () => 1"}, %{
+                 req_options: [plug: {Req.Test, ErrorPathStub}]
+               })
+
+      decoded = Jason.decode!(result)
+      assert [%{"api" => "petstore", "status" => 200}] = decoded["calls"]
+      assert decoded["error"] =~ "sandbox error"
+      assert decoded["error"] =~ "ReferenceError"
 
       {:links, later} = Process.info(self(), :links)
       assert later == before
     end
 
-    # M9: the timeout branch has its own message shape.
-    test "an executor timeout surfaces the elapsed budget", %{opts: opts} do
+    # M9: the timeout branch has its own message shape, and (I1) still
+    # surfaces the calls made before the timeout hit rather than discarding
+    # them.
+    test "an executor timeout surfaces the elapsed budget and the calls already made", %{
+      opts: opts
+    } do
       Mock.set_response(fn _c, _e -> {:error, {:timeout, 30_000}} end)
       execute = Tools.definitions(opts) |> Enum.find(&(&1.name == "execute_api_code"))
 
-      assert {:error, "sandbox timed out after 30000 ms"} =
+      assert {:ok, result} =
                execute.handler.(%{"code" => "async () => while(true){}"}, %{})
+
+      assert result == ~s({"calls":[],"logs":[],"error":"sandbox timed out after 30000 ms"})
+    end
+
+    # I1: a Deno bootstrap crash mid-run still carries whatever console.log
+    # output happened before the crash; the tool layer must not discard it.
+    test "executor errors that carry logs surface them in the envelope", %{opts: opts} do
+      Mock.set_response(fn _c, _e ->
+        {:error, %{message: "nope is not defined", logs: ["before the crash"]}}
+      end)
+
+      execute = Tools.definitions(opts) |> Enum.find(&(&1.name == "execute_api_code"))
+      assert {:ok, result} = execute.handler.(%{"code" => "async () => 1"}, %{})
+
+      decoded = Jason.decode!(result)
+      assert decoded["logs"] == ["before the crash"]
+      assert decoded["error"] =~ "nope is not defined"
     end
 
     # M5: a model that emits the tool call without arguments must get a
@@ -290,6 +340,57 @@ defmodule OapiCodemode.ToolsTest do
       {:ok, result} = execute.handler.(%{"code" => "..."}, %{})
 
       assert result == ~s({"calls":[],"logs":["l"],"result":"v"})
+    end
+  end
+
+  # I2: tool names were hardcoded, blocking a host from registering both a
+  # read-only `execute_api_code` and a mutating `execute_api_mutations`
+  # variant (two `definitions/1` calls, each with its own policy and name).
+  describe "configurable execute tool name and search inclusion (I2)" do
+    test "default behavior is unchanged: search_apis + execute_api_code", %{opts: opts} do
+      defs = Tools.definitions(opts)
+      assert ["execute_api_code", "search_apis"] = defs |> Enum.map(& &1.name) |> Enum.sort()
+    end
+
+    test "a second definitions call with a custom execute_tool_name and no search yields exactly one tool",
+         %{opts: opts} do
+      mutating_opts =
+        opts
+        |> Keyword.put(:policy, :all)
+        |> Keyword.put(:execute_tool_name, "execute_api_mutations")
+        |> Keyword.put(:include_search, false)
+
+      defs = Tools.definitions(mutating_opts)
+      assert [%{name: "execute_api_mutations"}] = defs
+    end
+
+    test "policy :all description mentions mutations are allowed", %{opts: opts} do
+      mutating_opts =
+        opts
+        |> Keyword.put(:policy, :all)
+        |> Keyword.put(:execute_tool_name, "execute_api_mutations")
+
+      defs = Tools.definitions(mutating_opts)
+      execute = Enum.find(defs, &(&1.name == "execute_api_mutations"))
+      assert execute.description =~ ~r/mutat/i
+
+      # read-only (default) description must NOT claim mutations are allowed.
+      default_execute =
+        Tools.definitions(opts) |> Enum.find(&(&1.name == "execute_api_code"))
+
+      refute default_execute.description =~ ~r/mutating requests are allowed/i
+    end
+
+    test "a custom-named execute tool still handles calls correctly", %{opts: opts} do
+      Mock.set_response(fn _c, _e -> {:ok, %{value: "v", logs: []}} end)
+
+      mutating_opts = Keyword.put(opts, :execute_tool_name, "execute_api_mutations")
+
+      execute =
+        Tools.definitions(mutating_opts) |> Enum.find(&(&1.name == "execute_api_mutations"))
+
+      assert {:ok, result} = execute.handler.(%{"code" => "..."}, %{})
+      assert Jason.decode!(result)["result"] == "v"
     end
   end
 end

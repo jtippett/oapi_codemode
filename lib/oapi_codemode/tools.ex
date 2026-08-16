@@ -11,6 +11,20 @@ defmodule OapiCodemode.Tools do
     * `:policy` — :read_only (default) or :all
     * `:max_result_tokens` — default 6000
     * `:timeout` — sandbox timeout ms, default 30_000
+    * `:execute_tool_name` — default "execute_api_code". A host that wants a
+      separate mutating tool alongside the read-only one calls `definitions/1`
+      twice: once with the defaults (search + read-only execute), once with
+      `policy: :all`, a distinct `:execute_tool_name` (e.g.
+      `"execute_api_mutations"`), and `include_search: false` (search only
+      needs to be offered once).
+    * `:include_search` — default true. Set false to omit `search_apis` from
+      the returned list (for the second call in the two-tool-variant pattern
+      above).
+
+  I2: `execute_api_code`/`execute_api_mutations` are two separate tools with
+  two separate names precisely so a host's tool-approval layer (e.g. ele's
+  auto-approve-reads-but-confirm-writes policy) can gate on the *name* alone
+  without inspecting arguments.
 
   Handler contract: `handler.(args, host_ctx) -> {:ok, json_string} | {:error, message}`.
   `host_ctx` may carry `:context` (opaque identity for the credential
@@ -50,30 +64,42 @@ defmodule OapiCodemode.Tools do
         ]
   def definitions(opts) do
     entries = Registry.list(Keyword.fetch!(opts, :registry))
+    policy = Keyword.get(opts, :policy, :read_only)
+    execute_tool_name = Keyword.get(opts, :execute_tool_name, "execute_api_code")
+    include_search = Keyword.get(opts, :include_search, true)
 
-    [
-      %{
-        name: "search_apis",
-        description: Descriptions.search(entries),
-        input_schema: @code_schema,
-        handler: fn args, host_ctx -> search(args, host_ctx, opts) end
-      },
-      %{
-        name: "execute_api_code",
-        description: Descriptions.execute(entries),
-        input_schema: @code_schema,
-        handler: fn args, host_ctx -> execute(args, host_ctx, opts) end
-      }
-    ]
+    search_tools =
+      if include_search do
+        [
+          %{
+            name: "search_apis",
+            description: Descriptions.search(entries),
+            input_schema: @code_schema,
+            handler: fn args, host_ctx -> search(args, host_ctx, opts) end
+          }
+        ]
+      else
+        []
+      end
+
+    execute_tool = %{
+      name: execute_tool_name,
+      description: Descriptions.execute(entries, policy),
+      input_schema: @code_schema,
+      handler: fn args, host_ctx -> execute(args, host_ctx, opts) end
+    }
+
+    search_tools ++ [execute_tool]
   end
 
   defp search(%{"code" => code}, _host_ctx, opts) when is_binary(code) do
     entries = Registry.list(Keyword.fetch!(opts, :registry))
     globals = %{"specs" => Map.new(entries, fn {name, e} -> {name, e.artifact.spec} end)}
 
-    run(opts, code, %{globals: globals, callbacks: %{}}, fn %{value: value} ->
-      Result.encode(value, max_tokens(opts))
-    end)
+    case run_sandbox(opts, code, %{globals: globals, callbacks: %{}}) do
+      {:ok, %{value: value}} -> Result.encode(value, max_tokens(opts))
+      {:error, reason} -> {:error, elem(normalize_error(reason), 0)}
+    end
   end
 
   # M5: a model that emits the tool call with no arguments (or a typo'd key)
@@ -132,20 +158,36 @@ defmodule OapiCodemode.Tools do
       %{"apiNames" => Enum.map(entries, fn {name, _} -> name end)}
       |> Map.merge(context_globals(entries))
 
-    run(opts, code, %{globals: globals, callbacks: %{request: request_callback}}, fn out ->
-      Result.encode(envelope(out, safe_get(calls)), max_tokens(opts))
-    end)
+    env = %{globals: globals, callbacks: %{request: request_callback}}
+
+    # I1: on a sandbox error/timeout the call metadata must NOT be
+    # discarded — mutations may have landed before the crash, and the
+    # design requires the tool result to show what the code actually did.
+    # So execute never returns the pre-sandbox {:error, _} shape for a
+    # sandbox failure; the failure is surfaced as data in the envelope
+    # instead (consistent with how proxy [phase]-tagged errors already
+    # surface as data, not as a raised tool error). {:error, _} is
+    # reserved for failures before the sandbox ever runs (missing code).
+    case run_sandbox(opts, code, env) do
+      {:ok, out} ->
+        Result.encode(
+          envelope(safe_get(calls), out.logs, {"result", out.value}),
+          max_tokens(opts)
+        )
+
+      {:error, reason} ->
+        {message, logs} = normalize_error(reason)
+        Result.encode(envelope(safe_get(calls), logs, {"error", message}), max_tokens(opts))
+    end
   end
 
   # M1: explicit key order. Truncation chops the TAIL, so the bounded,
   # high-signal metadata (which calls were made, what the code logged) goes
-  # first and the unbounded result goes last — losing the tail of a huge
-  # result is tolerable; losing the record of what the sandbox actually did
-  # upstream is not.
-  defp envelope(out, call_log) do
-    %Jason.OrderedObject{
-      values: [{"calls", call_log}, {"logs", out.logs}, {"result", out.value}]
-    }
+  # first and the unbounded result/error goes last — losing the tail of a
+  # huge result is tolerable; losing the record of what the sandbox
+  # actually did upstream is not.
+  defp envelope(call_log, logs, {key, value}) do
+    %Jason.OrderedObject{values: [{"calls", call_log}, {"logs", logs}, {key, value}]}
   end
 
   defp dispatch(registry, entries, api_name, req_opts, ctx) do
@@ -184,26 +226,34 @@ defmodule OapiCodemode.Tools do
     :exit, _ -> :ok
   end
 
-  defp run(opts, code, env, on_ok) do
+  # I1: an executor that raises must not take the host's tool loop with it —
+  # the tool contract is {:ok, json} | {:error, message}, always. Returns
+  # the executor's raw {:ok, result} | {:error, reason}; callers decide how
+  # to present a sandbox failure (search: as a tool error; execute: as data
+  # in the envelope, via `normalize_error/1`).
+  defp run_sandbox(opts, code, env) do
     executor = Keyword.fetch!(opts, :executor)
     timeout = Keyword.get(opts, :timeout, 30_000)
 
-    # I1: an executor that raises must not take the host's tool loop with
-    # it; the tool contract is {:ok, json} | {:error, message}, always.
-    result =
-      try do
-        executor.run(code, env, timeout: timeout)
-      rescue
-        e -> {:error, {:raised, Exception.message(e)}}
-      end
-
-    case result do
-      {:ok, out} -> on_ok.(out)
-      {:error, {:timeout, ms}} -> {:error, "sandbox timed out after #{ms} ms"}
-      {:error, {:raised, message}} -> {:error, "sandbox error: #{sanitize(message)}"}
-      {:error, reason} -> {:error, "sandbox error: #{sanitize(reason)}"}
+    try do
+      executor.run(code, env, timeout: timeout)
+    rescue
+      e -> {:error, {:raised, Exception.message(e)}}
     end
   end
+
+  # Turns any shape an Executor may return for {:error, reason} into a
+  # uniform {message, logs} pair. `%{message: _, logs: _}` is what
+  # Deno.ex sends for an in-sandbox crash (the bootstrap's "done" message
+  # with an error still carries whatever console.log output happened
+  # before the crash) — those logs must reach the caller, not be dropped.
+  defp normalize_error({:timeout, ms}), do: {"sandbox timed out after #{ms} ms", []}
+  defp normalize_error({:raised, message}), do: {"sandbox error: #{sanitize(message)}", []}
+
+  defp normalize_error(%{message: message, logs: logs}) when is_list(logs),
+    do: {"sandbox error: #{sanitize(message)}", logs}
+
+  defp normalize_error(reason), do: {"sandbox error: #{sanitize(reason)}", []}
 
   # Error hygiene (the ele formatError lesson): first line only, no file
   # paths or data-URL stack frames. Full detail belongs in host logs.

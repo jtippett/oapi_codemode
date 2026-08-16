@@ -28,12 +28,24 @@ defmodule OapiCodemode.Executor.DenoTest do
              )
   end
 
-  test "runtime errors return {:error, first_line}" do
-    assert {:error, msg} =
+  test "runtime errors return {:error, %{message: first_line, logs: [...]}}" do
+    assert {:error, %{message: msg, logs: logs}} =
              Deno.run("async () => nope.nope", %{globals: %{}, callbacks: %{}}, timeout: 10_000)
 
     assert msg =~ "nope"
     refute msg =~ "data:application"
+    assert logs == []
+  end
+
+  test "runtime error logs are captured even though the run failed" do
+    code =
+      ~s|async () => { console.log("before the crash"); return nope.nope; }|
+
+    assert {:error, %{message: msg, logs: logs}} =
+             Deno.run(code, %{globals: %{}, callbacks: %{}}, timeout: 10_000)
+
+    assert msg =~ "nope"
+    assert logs == ["before the crash"]
   end
 
   test "syntax errors are errors, not hangs" do

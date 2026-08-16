@@ -54,6 +54,19 @@ defmodule OapiCodemode.Tools.DescriptionsTest do
     assert desc =~ "declare const apiNames: string[];"
   end
 
+  test "execute description defaults to no mutation-allowed paragraph", %{reg: reg} do
+    desc = Descriptions.execute(Registry.list(reg))
+    refute desc =~ ~r/mutating requests are allowed/i
+  end
+
+  # I2: when a host registers a mutating variant of the execute tool
+  # (`policy: :all`), the model must be told explicitly — the read-only
+  # default description must not silently start allowing writes.
+  test "execute description under policy :all states mutating requests are allowed", %{reg: reg} do
+    desc = Descriptions.execute(Registry.list(reg), :all)
+    assert desc =~ ~r/mutating requests are allowed/i
+  end
+
   test "tag vocabularies are truncated past the limit", %{} do
     {:ok, art} = Ingest.ingest(Fixtures.clean_3_1())
     many_tags = %{art | tags: Enum.map(1..100, &"tag#{&1}")}

@@ -183,6 +183,62 @@ defmodule OapiCodemode.Executor.DenoTest do
     refute_receive {_port, {:data, _}}, 0
   end
 
+  # Regression: the first fix ran the port lifecycle inside `Task.async/1`,
+  # which LINKS the task to the caller. A caller that traps exits — the
+  # normal setup for a host GenServer — therefore got `{:EXIT, pid, :normal}`
+  # when the task finished: the very class of unmatched straggler message
+  # the fix was meant to remove, just wearing a different tag. `run/3` must
+  # send the caller nothing that outlives the call, trap_exit or not.
+  test "no stray messages leak into a trap_exit caller after run/3 returns" do
+    Process.flag(:trap_exit, true)
+
+    assert {:ok, %{value: 1}} =
+             Deno.run("async () => 1", %{globals: %{}, callbacks: %{}}, timeout: 10_000)
+
+    refute_receive {:EXIT, _, _}, 200
+    refute_receive {:DOWN, _, _, _, _}, 0
+    refute_receive {_port, {:exit_status, _}}, 0
+    refute_receive {_port, {:data, _}}, 0
+  end
+
+  # Regression: the sandbox timeout used to be a per-receive IDLE timer —
+  # every callback message reset it — so sandbox code that calls a callback
+  # in an infinite loop never tripped it. The outer `Task.await(timeout +
+  # 5_000)` backstop then fired and EXITed the caller (an exit is not
+  # `rescue`-able, so it tore through `Tools.run_sandbox/3` into the host's
+  # tool loop), and since the worker died from an exit signal its `after`
+  # clause never ran — the `deno` child was orphaned and kept spinning.
+  # The timeout is now a real wall-clock deadline.
+  test "callback traffic cannot outlive the timeout (deadline, not idle timer)" do
+    test_pid = self()
+    callback = fn "a", _req -> %{"status" => 200} end
+
+    code = ~s|async () => {
+      for (;;) {
+        try { await apis.a.request({ path: "/x" }); } catch (e) {}
+      }
+    }|
+
+    started = System.monotonic_time(:millisecond)
+
+    result =
+      Deno.run(
+        code,
+        %{globals: %{"apiNames" => ["a"]}, callbacks: %{request: callback}},
+        timeout: 500,
+        report_pid: test_pid
+      )
+
+    elapsed = System.monotonic_time(:millisecond) - started
+
+    assert {:error, {:timeout, 500}} = result
+    assert elapsed < 3_000, "run/3 took #{elapsed}ms — timeout is not a real deadline"
+    assert Process.alive?(test_pid)
+
+    assert_received {:deno_pid, os_pid}
+    assert wait_until_dead(os_pid), "process #{os_pid} still alive after deadline kill"
+  end
+
   test "no network access inside the sandbox" do
     code =
       ~s|async () => { try { await fetch("https://example.com"); return "fetched"; } catch (e) { return "blocked"; } }|

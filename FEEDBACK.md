@@ -156,3 +156,23 @@ caller) expects an executor's raise to be. Regression test:
 into the calling process after run/3 returns".
 **Severity:** blocking
 **Resolved:** this commit
+
+**Follow-up (2026-08-17):** that first fix was incomplete on two counts,
+both closed now. (1) `Task.async/1` LINKS the task to the caller, so a
+caller that traps exits — the normal setup for a host GenServer, i.e. the
+exact caller this entry is about — still received a straggler,
+`{:EXIT, pid, :normal}`, when the task finished; the original regression
+test did not trap exits, so it passed. `run/3` now uses an unlinked
+`spawn_monitor` and consumes/flushes the `:DOWN` before returning. (2)
+`:timeout` was a per-receive IDLE timer, so sandbox code calling a
+callback in an infinite loop reset it forever; the outer
+`Task.await(timeout + 5_000)` backstop then EXITed the caller (an exit is
+not `rescue`-able, so it tore straight through
+`Tools.run_sandbox/3`), and the task died from a signal, skipping its
+`after` clause and orphaning a spinning `deno` child. The timeout is now
+a real wall-clock deadline threaded through every `receive`, `run/3`
+always returns `{:ok, _} | {:error, _}` (never exits/raises into the
+caller), and the backstop reaps the child by the OS pid the worker
+reports at spawn. Regression tests: "no stray messages leak into a
+trap_exit caller after run/3 returns" and "callback traffic cannot
+outlive the timeout (deadline, not idle timer)".

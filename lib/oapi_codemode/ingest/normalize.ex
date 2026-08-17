@@ -37,7 +37,7 @@ defmodule OapiCodemode.Ingest.Normalize do
   defp paths_map(_), do: %{}
 
   defp path_operations(path, item, spec) when is_map(item) do
-    path_level_params = list_or_empty(Map.get(item, "parameters", []))
+    path_level_params = param_list(Map.get(item, "parameters", []))
 
     for method <- @methods, op = item[method], is_map(op) do
       %Operation{
@@ -48,7 +48,7 @@ defmodule OapiCodemode.Ingest.Normalize do
         summary: op["summary"] || op["description"],
         tags: list_or_empty(op["tags"]),
         parameters:
-          merge_parameters(path_level_params, list_or_empty(Map.get(op, "parameters", []))),
+          merge_parameters(path_level_params, param_list(Map.get(op, "parameters", []))),
         request_body: extract_body(op["requestBody"]),
         security: op["security"] || spec["security"]
       }
@@ -57,13 +57,22 @@ defmodule OapiCodemode.Ingest.Normalize do
 
   defp path_operations(_path, _item, _spec), do: []
 
-  # Lenient-ignore policy (see `paths_map/1` above): a `parameters` or
-  # `tags` field that isn't a list is dropped rather than raising. This is
-  # the same policy applied consistently across the module — malformed
-  # fields are ignored, never fatal, so tenant-uploaded specs can never
-  # crash ingest.
+  # Lenient-ignore policy (see `paths_map/1` above): a `tags` field that
+  # isn't a list is dropped rather than raising — same policy applied
+  # consistently across the module: malformed fields are ignored, never
+  # fatal. This only guards the field's own shape (list vs. not); for
+  # `parameters`, whose elements are read individually further down the
+  # pipeline (`param_key/1`), see `param_list/1` below.
   defp list_or_empty(list) when is_list(list), do: list
   defp list_or_empty(_), do: []
+
+  # `parameters` needs a stronger guard than `list_or_empty/1`: even when
+  # the field is a list, individual elements are dereferenced later
+  # (`param_key/1` reads `param["name"]`/`param["in"]`), so a list
+  # containing a non-map element (e.g. `["nope"]`) would still raise.
+  # Lenient-ignore policy applies per-element too: a malformed parameter
+  # entry is dropped, its well-formed siblings are kept.
+  defp param_list(list), do: list |> list_or_empty() |> Enum.filter(&is_map/1)
 
   # OpenAPI 3.x semantics: an operation-level parameter with the same
   # (name, in) pair overrides the path-level parameter rather than
@@ -107,17 +116,21 @@ defmodule OapiCodemode.Ingest.Normalize do
   # `content` must be a map (media-type -> media object) per the OpenAPI
   # spec; a malformed non-map `content` is treated as no body at all
   # rather than raising (same lenient-ignore policy as the rest of the
-  # module).
+  # module). Each media object under `content` must itself be a map (its
+  # `schema` is read below) — a malformed non-map media object is treated
+  # as a media object with no schema, rather than raising.
   defp extract_body(%{"content" => content} = body) when is_map(content) do
     fallback = Enum.at(content, 0, {nil, %{}})
 
     {content_type, media} =
       Enum.find(content, fallback, fn {ct, _} -> ct =~ "json" end)
 
+    schema = if is_map(media), do: media["schema"]
+
     %{
       "required" => Map.get(body, "required", false),
       "content_type" => content_type,
-      "schema" => media["schema"]
+      "schema" => schema
     }
   end
 

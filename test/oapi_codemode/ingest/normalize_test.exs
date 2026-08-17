@@ -146,5 +146,76 @@ defmodule OapiCodemode.Ingest.NormalizeTest do
     test "top-level paths that is a list is ignored (no operations)" do
       assert Normalize.operations(%{"openapi" => "3.1.0", "paths" => ["nope"]}) == []
     end
+
+    # Reviewer-reported (2nd pass, FEEDBACK.md 2026-08-16): a `parameters`
+    # list can pass the list-shape guard above yet still contain non-map
+    # elements, which crashed `param_key/1` reading `param["name"]`. The
+    # malformed element is dropped; well-formed siblings are kept.
+    test "a list of non-map parameter elements is ignored (path-level)" do
+      spec = %{
+        "openapi" => "3.1.0",
+        "paths" => %{
+          "/things" => %{
+            "parameters" => ["nope"],
+            "get" => %{"responses" => %{}}
+          }
+        }
+      }
+
+      assert [op] = Normalize.operations(spec)
+      assert op.parameters == []
+    end
+
+    test "a list of non-map parameter elements is ignored (operation-level)" do
+      spec = %{
+        "openapi" => "3.1.0",
+        "paths" => %{
+          "/things" => %{
+            "get" => %{"responses" => %{}, "parameters" => ["nope"]}
+          }
+        }
+      }
+
+      assert [op] = Normalize.operations(spec)
+      assert op.parameters == []
+    end
+
+    test "non-map elements are dropped from an otherwise-valid parameter list" do
+      spec = %{
+        "openapi" => "3.1.0",
+        "paths" => %{
+          "/things" => %{
+            "get" => %{
+              "responses" => %{},
+              "parameters" => ["nope", %{"name" => "id", "in" => "query"}]
+            }
+          }
+        }
+      }
+
+      assert [op] = Normalize.operations(spec)
+      assert [%{"name" => "id", "in" => "query"}] = op.parameters
+    end
+
+    # Reviewer-reported: a media object under `requestBody.content` (a
+    # non-map value keyed by content-type) crashed reading `media["schema"]`.
+    test "a non-map media object under requestBody.content is ignored (no schema)" do
+      spec = %{
+        "openapi" => "3.1.0",
+        "paths" => %{
+          "/things" => %{
+            "post" => %{
+              "responses" => %{},
+              "requestBody" => %{"content" => %{"application/json" => "nope"}}
+            }
+          }
+        }
+      }
+
+      assert [op] = Normalize.operations(spec)
+      assert op.request_body["schema"] == nil
+      assert op.request_body["content_type"] == "application/json"
+      assert op.request_body["required"] == false
+    end
   end
 end

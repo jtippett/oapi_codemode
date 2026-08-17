@@ -127,6 +127,24 @@ still succeeds with the garbage field dropped.
 **Severity:** blocking
 **Resolved:** this commit
 
+**Update (2026-08-17):** That fix was itself incomplete. A follow-up
+review found three more live crash sites, empirically verified, not
+covered by the pass above: `Ingest.ingest/1` reading
+`get_in(deref, ["components", "securitySchemes"])`, which raises when
+`components` is a non-map (`FunctionClauseError`/`ArgumentError`
+depending on shape); `Normalize.extract_body/1` reading `media["schema"]`
+without checking the media object itself is a map (a `content` entry
+whose value is e.g. a string raises); and `Normalize.list_or_empty/1`
+checking only that `parameters` is a list, not that its elements are
+maps (`["nope"]` passes the guard and raises later in `param_key/1`).
+Same lenient-ignore policy applied to all three: the malformed field (or,
+for parameter elements, just the malformed element) is dropped, ingest
+still succeeds. Also added a rescue backstop around the whole of
+`Ingest.ingest/1` so the next unaudited crash site downgrades to
+`{:error, {:malformed_spec, _}}` instead of raising, with the exception
+message truncated so it can't leak large spec content back to the caller.
+Closed in this commit.
+
 ## 2026-08-16 — gentility — Deno executor leaked a stray port message into the host's long-lived caller
 
 **What happened:** Discovered by the first real end-to-end test of

@@ -362,7 +362,59 @@ defmodule OapiCodemode.ToolsTest do
         |> Enum.map(& &1.name)
 
       assert "x_api_search" in custom_names
+      # M2: the custom name replaces the default outright — it must not be
+      # emitted alongside it as a second, stray tool.
+      refute "search_apis" in custom_names
       assert "search_apis" in Enum.map(Tools.definitions(opts), & &1.name)
+    end
+
+    # I2: the execute tool's description must name its own paired search
+    # tool, not the other trio's — otherwise a host running several
+    # search/execute instances can't tell the model which pair goes
+    # together.
+    test "execute description names the paired search tool by its configured name", %{
+      opts: opts
+    } do
+      custom_opts = Keyword.put(opts, :search_tool_name, "x_api_search")
+      defs = Tools.definitions(custom_opts)
+      execute = Enum.find(defs, &(&1.name == "execute_api_code"))
+
+      assert execute.description =~ "`x_api_search` tool"
+    end
+
+    # I2: the second call in the two-tool-variant pattern sets
+    # include_search: false — no search tool is emitted from THIS call, and
+    # none was named, so the description must not claim one exists.
+    test "execute description names no search tool when include_search is false and none was given",
+         %{opts: opts} do
+      mutating_opts =
+        opts
+        |> Keyword.put(:policy, :all)
+        |> Keyword.put(:execute_tool_name, "execute_api_mutations")
+        |> Keyword.put(:include_search, false)
+
+      defs = Tools.definitions(mutating_opts)
+      execute = Enum.find(defs, &(&1.name == "execute_api_mutations"))
+
+      refute execute.description =~ "search"
+    end
+
+    # I2: a host can still advertise a search tool it emits from a
+    # DIFFERENT definitions/1 call by naming it explicitly, even when this
+    # call's include_search is false.
+    test "execute description names an explicitly given search tool even when include_search is false",
+         %{opts: opts} do
+      mutating_opts =
+        opts
+        |> Keyword.put(:policy, :all)
+        |> Keyword.put(:execute_tool_name, "execute_api_mutations")
+        |> Keyword.put(:include_search, false)
+        |> Keyword.put(:search_tool_name, "x_api_search")
+
+      defs = Tools.definitions(mutating_opts)
+      execute = Enum.find(defs, &(&1.name == "execute_api_mutations"))
+
+      assert execute.description =~ "`x_api_search` tool"
     end
 
     test "a second definitions call with a custom execute_tool_name and no search yields exactly one tool",
@@ -404,6 +456,23 @@ defmodule OapiCodemode.ToolsTest do
 
       assert {:ok, result} = execute.handler.(%{"code" => "..."}, %{})
       assert Jason.decode!(result)["result"] == "v"
+    end
+  end
+
+  # M1: a host that accidentally reuses the same name for both tools would
+  # otherwise get two tools sharing one name (the caller's tool-approval
+  # layer, keyed by name, can only see one of them) or, worse, an execute
+  # description pointing the model at itself as "the search tool". This is
+  # a config mistake, so it must fail loudly at definitions/1 time.
+  describe "search_tool_name/execute_tool_name collision guard (M1)" do
+    test "raises when the two names collide via explicit execute_tool_name", %{opts: opts} do
+      bad_opts = Keyword.put(opts, :execute_tool_name, "search_apis")
+      assert_raise ArgumentError, ~r/must differ/, fn -> Tools.definitions(bad_opts) end
+    end
+
+    test "raises when the two names collide via explicit search_tool_name", %{opts: opts} do
+      bad_opts = Keyword.put(opts, :search_tool_name, "execute_api_code")
+      assert_raise ArgumentError, ~r/must differ/, fn -> Tools.definitions(bad_opts) end
     end
   end
 end

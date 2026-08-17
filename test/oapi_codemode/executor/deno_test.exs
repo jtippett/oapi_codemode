@@ -180,7 +180,7 @@ defmodule OapiCodemode.Executor.DenoTest do
              Deno.run("async () => 1", %{globals: %{}, callbacks: %{}}, timeout: 10_000)
 
     refute_receive {_port, {:exit_status, _}}, 200
-    refute_receive {_port, {:data, _}}, 0
+    refute_receive {_port, {:data, _}}, 200
   end
 
   # Regression: the first fix ran the port lifecycle inside `Task.async/1`,

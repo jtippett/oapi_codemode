@@ -67,12 +67,17 @@ defmodule OapiCodemode.Tools.Descriptions do
   that registers a second, mutating tool variant (via `Tools.definitions/1`
   with `policy: :all` and a distinct `:execute_tool_name`) must not leave
   the model to assume the read-only default's restrictions still apply.
+
+  `search_tool_name` is the name of the paired search tool, named so the
+  model pairs the right search with the right execute when a host emits
+  several search/execute trios under distinct names — pass `nil` when no
+  search tool exists for this execute tool to point to (the description
+  then makes no claim that one does).
   """
-  @spec execute([{String.t(), struct()}], :read_only | :all) :: String.t()
-  def execute(entries, policy \\ :read_only) do
+  @spec execute([{String.t(), struct()}], :read_only | :all, String.t() | nil) :: String.t()
+  def execute(entries, policy \\ :read_only, search_tool_name \\ "search_apis") do
     """
-    Execute JavaScript that calls the registered APIs. First use the search
-    tool to find the right operations, then call apis.<name>.request().
+    Execute JavaScript that calls the registered APIs. #{intro_sentence(search_tool_name)}
     Requests are validated against the spec and credentialed server-side;
     you never handle credentials.
 
@@ -104,6 +109,13 @@ defmodule OapiCodemode.Tools.Descriptions do
     #{policy_paragraph(policy)}
     """
   end
+
+  defp intro_sentence(nil), do: "Call apis.<name>.request() for the operation you need."
+
+  defp intro_sentence(search_tool_name),
+    do:
+      "First use the `#{search_tool_name}` tool to find the right operations, " <>
+        "then call apis.<name>.request()."
 
   defp policy_paragraph(:all) do
     "\nMutating requests are allowed with this tool: POST, PUT, PATCH, and " <>

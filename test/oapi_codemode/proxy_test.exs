@@ -200,6 +200,46 @@ defmodule OapiCodemode.ProxyTest do
              )
   end
 
+  # I1: Req only entry-merges :params across TWO SEPARATE Req.new/Req.merge
+  # calls; a single combined options list (config.req_options ++
+  # ctx.req_options, both carrying :params) collapses to whichever :params
+  # entry is LAST via Map.new/1 — the registration-time param silently
+  # vanishes. The proxy must merge :params itself before Req ever sees it.
+  test "registration-time and call-time :params merge; call-time wins on key collision", %{
+    entry: entry,
+    ctx: ctx
+  } do
+    Req.Test.stub(ParamsMergeStub, fn conn ->
+      Req.Test.json(conn, %{"qs" => conn.query_string})
+    end)
+
+    entry = %{
+      entry
+      | config: %{
+          entry.config
+          | req_options: [params: [account: "acct_123", scope: "config"]]
+        }
+    }
+
+    ctx = %{
+      ctx
+      | req_options: [plug: {Req.Test, ParamsMergeStub}, params: [scope: "call", extra: "x"]]
+    }
+
+    assert {:ok, %{status: 200, body: %{"qs" => qs}}} =
+             Proxy.request(
+               entry,
+               "petstore",
+               %{"method" => "GET", "path" => "/pets", "query" => %{"limit" => 1}},
+               ctx
+             )
+
+    assert qs =~ "account=acct_123"
+    assert qs =~ "extra=x"
+    assert qs =~ "scope=call"
+    refute qs =~ "scope=config"
+  end
+
   test "JSON body is posted; response headers are whitelisted", %{entry: entry, ctx: ctx} do
     Req.Test.stub(OapiCodemodeStub, fn conn ->
       {:ok, raw, conn} = Plug.Conn.read_body(conn)

@@ -168,8 +168,13 @@ but replaces it with a fixed, redacted string before it reaches the model.
   `connect_options` for an egress proxy), appended ahead of the call-time
   `host_ctx.req_options` passed to the tool handler. Scalar options (like
   `:connect_options` or `:redirect`) let the call-time value win on
-  conflict; `:headers` and `:params` are *merged* by `Req`, not replaced, so
-  entries from both layers survive.
+  conflict; `:headers` and `:params` are *merged* (call-time wins on key
+  collision, registration-time entries survive otherwise), so entries from
+  both layers survive. (`:headers` merging is `Req`'s own doing; `:params`
+  is merged by the proxy itself before the request reaches `Req` — `Req`
+  only entry-merges options across separate `Req.new`/`Req.merge` calls, so
+  a single combined options list with two `:params` entries would otherwise
+  let the later one silently replace the earlier one wholesale.)
 - `validate` — `:strict` (default, rejects on the first schema mismatch),
   `:warn` (logs and proceeds), or `:off`.
 - `max_response_bytes` — upstream response body cap surfaced to the

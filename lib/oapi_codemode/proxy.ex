@@ -212,7 +212,7 @@ defmodule OapiCodemode.Proxy do
             # that wants redirects can pass `redirect: true` in req_options,
             # which is appended after this default and wins.
             redirect: false
-          ] ++ config.req_options ++ ctx.req_options
+          ] ++ merge_req_options(config.req_options, ctx.req_options)
         )
 
       case Req.request(req) do
@@ -232,6 +232,32 @@ defmodule OapiCodemode.Proxy do
 
           {:error, %{phase: :transport, message: "upstream request failed (#{error_name(err)})"}}
       end
+    end
+  end
+
+  # I1: Req entry-merges `:headers` across a single options list (it's split
+  # out and folded with Req.Fields.merge/2 per occurrence), but `:params`
+  # goes through the generic options bucket, which is built with
+  # `Map.new/1` — a keyword list with two `:params` entries collapses to
+  # whichever one is LAST, wholesale. Concatenating config.req_options ++
+  # ctx.req_options and handing the result straight to Req therefore let a
+  # call-time `:params` silently erase a registration-time one. Merge
+  # `:params` entry-wise ourselves (call-time wins on key collision) before
+  # Req ever sees the combined list; every other key keeps the existing
+  # override-by-concatenation-order semantics (call-time wins on conflict).
+  defp merge_req_options(config_opts, call_opts) do
+    case {Keyword.get(config_opts, :params), Keyword.get(call_opts, :params)} do
+      {nil, _} ->
+        config_opts ++ call_opts
+
+      {_, nil} ->
+        config_opts ++ call_opts
+
+      {config_params, call_params} ->
+        merged_params = Keyword.merge(config_params, call_params)
+
+        Keyword.delete(config_opts, :params) ++
+          Keyword.delete(call_opts, :params) ++ [params: merged_params]
     end
   end
 

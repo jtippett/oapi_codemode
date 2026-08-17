@@ -39,6 +39,32 @@ defmodule OapiCodemode.Tools.DescriptionsTest do
     assert desc =~ "status"
   end
 
+  # I2: with per-instance tool naming (e.g. stripe_api_search/execute
+  # trios), the description must name the ACTUAL paired search tool, not a
+  # generic "the search tool" — otherwise the model can pair the wrong
+  # search with the wrong execute.
+  test "execute description defaults to naming the search_apis tool", %{reg: reg} do
+    desc = Descriptions.execute(Registry.list(reg))
+    assert desc =~ "`search_apis` tool"
+  end
+
+  test "execute description interpolates a custom search tool name", %{reg: reg} do
+    desc = Descriptions.execute(Registry.list(reg), :read_only, "stripe_api_search")
+    assert desc =~ "`stripe_api_search` tool"
+    refute desc =~ "`search_apis`"
+  end
+
+  # I2: include_search: false means no search tool is emitted from this
+  # call. If the host also gave no :search_tool_name, none exists to name —
+  # the description must not reference a nonexistent tool.
+  test "execute description omits any search-tool reference when search_tool_name is nil", %{
+    reg: reg
+  } do
+    desc = Descriptions.execute(Registry.list(reg), :read_only, nil)
+    refute desc =~ "search"
+    assert desc =~ "apis.<name>.request()"
+  end
+
   # T-I2: the sandbox really receives `context` and `apiNames` globals, but
   # the description only named them in prose. Declare them like `apis`, and
   # show the real path the LLM must type — not a placeholder.

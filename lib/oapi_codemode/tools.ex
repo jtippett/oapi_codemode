@@ -73,6 +73,17 @@ defmodule OapiCodemode.Tools do
     execute_tool_name = Keyword.get(opts, :execute_tool_name, "execute_api_code")
     include_search = Keyword.get(opts, :include_search, true)
 
+    # M1: a collision would either register two tools under one name (the
+    # host's tool layer overwrites one silently) or, in the two-tool-variant
+    # pattern, point the execute description at a tool that's actually
+    # itself — either way the model is misled about what to call. This is a
+    # config mistake, not a runtime condition, so raise.
+    if search_tool_name == execute_tool_name do
+      raise ArgumentError,
+            "search_tool_name and execute_tool_name must differ " <>
+              "(both were #{inspect(search_tool_name)})"
+    end
+
     search_tools =
       if include_search do
         [
@@ -87,9 +98,21 @@ defmodule OapiCodemode.Tools do
         []
       end
 
+    # I2: the execute description names the search tool it expects the model
+    # to have used first — a nonexistent one must never be named. If this
+    # call emits the search tool, it's always named. If it doesn't, only
+    # name it when the host explicitly says (via :search_tool_name) that one
+    # exists elsewhere; otherwise the description drops the reference.
+    description_search_name =
+      cond do
+        include_search -> search_tool_name
+        Keyword.has_key?(opts, :search_tool_name) -> search_tool_name
+        true -> nil
+      end
+
     execute_tool = %{
       name: execute_tool_name,
-      description: Descriptions.execute(entries, policy),
+      description: Descriptions.execute(entries, policy, description_search_name),
       input_schema: @code_schema,
       handler: fn args, host_ctx -> execute(args, host_ctx, opts) end
     }

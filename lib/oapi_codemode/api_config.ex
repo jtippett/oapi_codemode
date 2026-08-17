@@ -11,8 +11,10 @@ defmodule OapiCodemode.ApiConfig do
             max_response_bytes: 200_000,
             # per-API Req options (e.g. egress proxy connect_options), appended before
             # call-time host_ctx.req_options: for scalar options (e.g. :connect_options,
-            # :redirect) call-time wins on conflict; :headers and :params are MERGED by
-            # Req, not replaced, so both layers' entries survive
+            # :redirect) call-time wins on conflict; :headers and :params are MERGED
+            # (call-time wins on key collision, registration-time entries otherwise
+            # survive) — the proxy merges :params itself before handing off to Req,
+            # which only entry-merges :headers on its own
             req_options: []
 
   @type t :: %__MODULE__{}

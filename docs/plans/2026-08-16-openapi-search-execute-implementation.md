@@ -1,5 +1,13 @@
 # OpenAPI Search-and-Execute Library Implementation Plan
 
+> **Historical execution record — not current API documentation.** This
+> plan reflects the API as it existed when the tasks below were carried
+> out. The API has since evolved (e.g. `ApiConfig.context` was renamed to
+> `sandbox_globals`; `resolve/3` gained a request-destination argument and
+> became `resolve/4`), and this document was intentionally NOT rewritten to
+> track those changes. For current contracts, see the README and the
+> relevant module's `@moduledoc`.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Build `oapi_codemode`, an Elixir library that turns dropped-in OpenAPI specs into two codemode LLM tools (search and execute) with a validating, credential-injecting request proxy.

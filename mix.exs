@@ -35,6 +35,8 @@ defmodule OapiCodemode.MixProject do
       # Needed only while ex_zapcode is a path dep (forces a local NIF build);
       # goes away with the hex pin above.
       {:rustler, ">= 0.0.0", optional: true},
+      # Optional: only needed for OapiCodemode.Executor.Quicksand (QuickJS-NG).
+      {:quicksand, "~> 0.1", optional: true},
       {:req, "~> 0.5"},
       {:telemetry, "~> 1.2"},
       {:plug, "~> 1.16", only: :test}

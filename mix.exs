@@ -27,6 +27,14 @@ defmodule OapiCodemode.MixProject do
     [
       {:yaml_elixir, "~> 2.11"},
       {:jason, "~> 1.4"},
+      # Optional: only needed for OapiCodemode.Executor.ZapCode. Path dep until
+      # the hardened ex_zapcode ships to hex (needs zapcode branch
+      # harden/sandbox-untrusted-code pushed + rev-pinned first); then pin
+      # {:ex_zapcode, "~> 0.2", optional: true}.
+      {:ex_zapcode, path: "/Users/james/Desktop/lib/ex_zapcode", optional: true},
+      # Needed only while ex_zapcode is a path dep (forces a local NIF build);
+      # goes away with the hex pin above.
+      {:rustler, ">= 0.0.0", optional: true},
       {:req, "~> 0.5"},
       {:telemetry, "~> 1.2"},
       {:plug, "~> 1.16", only: :test}

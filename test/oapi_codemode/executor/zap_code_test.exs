@@ -81,15 +81,9 @@ defmodule OapiCodemode.Executor.ZapCodeTest do
              )
   end
 
-  # ENGINE GAP (zapcode): calling a user-defined function through a depth-2
-  # property chain (`apis.a.request(...)`) overwrites the base variable with
-  # the intermediate receiver — `apis` becomes `apis.a` — so the SECOND api
-  # call of a run finds `apis.a` undefined. Reproduced engine-only:
-  #   const o = {"a": {"r": (n) => n + 1}}; o.a.r(1); Object.keys(o) //=> ["r"]
-  # Builtin methods (`.filter`, `.toLowerCase`) do not clobber, so search
-  # workloads are unaffected. See ex_zapcode/SANDBOX_HARDENING_PLAN.md
-  # (consumer findings). Unskip when the engine fix lands.
-  @tag skip: "zapcode engine: depth-2 user-fn call clobbers base variable"
+  # Regression (zapcode receiver-provenance bug, fixed at engine eaa546a):
+  # `apis.a.request(...)` used to overwrite `apis` with `apis.a` on return,
+  # so the second api call of a run found `apis.a` undefined.
   test "two sequential api calls in one run" do
     callback = fn "a", %{"path" => path} -> %{"path" => path} end
 
@@ -107,11 +101,9 @@ defmodule OapiCodemode.Executor.ZapCodeTest do
              )
   end
 
-  # ENGINE GAP (zapcode): snapshot capture fails ("Serde Serialization Error")
-  # when a suspension happens with pending promises in scope — Promise.all
-  # over external calls cannot suspend at all, even flat ones. Unskip when
-  # the engine can snapshot pending promises.
-  @tag skip: "zapcode engine: cannot snapshot with pending promises in scope"
+  # Regression (fixed at engine eaa546a): suspending with a pending builtin
+  # call on the operand stack — Promise.all over api calls included — used
+  # to fail snapshot capture outright ("Serde Serialization Error").
   test "Promise.all over api calls works (serially — accepted P2.2 constraint)" do
     test_pid = self()
 

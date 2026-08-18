@@ -14,27 +14,17 @@ defmodule OapiCodemode.Executor.ZapCode do
   preamble prepended to the code — one entry per `globals["apiNames"]` name,
   each forwarding to the single registered external function.
 
-  ## Engine blockers (as of zapcode harden/sandbox-untrusted-code @ d766f57)
-
-  Two engine bugs currently limit `execute` runs to a SINGLE api call; both
-  are specified as skipped tests in `zap_code_test.exs` and written up in
-  ex_zapcode's SANDBOX_HARDENING_PLAN.md consumer-findings section:
-
-    * **Depth-2 user-fn call clobbers its base variable.** `apis.a.request(x)`
-      overwrites `apis` with `apis.a`, so the second api call of a run finds
-      `apis.a` undefined. Engine-only repro, no suspension needed:
-      `const o = {"a": {"r": (n) => n + 1}}; o.a.r(1)` leaves
-      `Object.keys(o) == ["r"]`. Builtin methods (`.filter`,
-      `.toLowerCase(...)`) do not clobber, so search runs over spec data are
-      unaffected.
-    * **Pending promises cannot be snapshotted.** `Promise.all` over api
-      calls fails at the first suspension with a snapshot serialization
-      error. Once fixed it will still resolve serially (accepted zapcode
-      constraint): wall-clock for N calls is the sum, not the max.
+  Requires zapcode >= engine commit eaa546a: earlier revisions clobber the
+  `apis` base variable on the second namespaced call and cannot snapshot
+  with a pending builtin call (Promise.all) on the operand stack — both
+  found integrating this module, both covered by regression tests here.
 
   Known divergences from `OapiCodemode.Executor.Deno`, all inherent to the
   engine rather than this module:
 
+    * **Callbacks are serial.** `Promise.all` over api calls works but
+      resolves one call at a time (accepted zapcode constraint):
+      wall-clock for N calls is the sum, not the max.
     * **Callback errors abort the run.** `resume` can only inject a return
       value, not a throwable, so a raising callback comes back to the model
       as this run's `{:error, %{message: ..., logs: ...}}` instead of a JS

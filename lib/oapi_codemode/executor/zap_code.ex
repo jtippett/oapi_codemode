@@ -109,10 +109,15 @@ defmodule OapiCodemode.Executor.ZapCode do
           {:error, message} -> {:error, %{message: message, logs: to_logs(acc)}}
         end
 
-      {:error, %ExZapcode.Exception{type: :timeout}} ->
+      # Plain-map __struct__ matches, not %ExZapcode.Exception{} — struct
+      # expansion needs the module at compile time, and ex_zapcode is an
+      # optional dep no consumer has, so the struct form makes this library
+      # uncompilable as a dependency (Elixir 1.20 type checking hard-errors
+      # on an undefined struct; plain remote calls only warn).
+      {:error, %{__struct__: ExZapcode.Exception, type: :timeout}} ->
         {:error, {:timeout, timeout}}
 
-      {:error, %ExZapcode.Exception{type: type, message: message}} ->
+      {:error, %{__struct__: ExZapcode.Exception, type: type, message: message}} ->
         {:error, %{message: "#{type}: #{message}", logs: to_logs(acc)}}
     end
   end

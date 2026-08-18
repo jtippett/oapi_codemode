@@ -15,6 +15,42 @@ Format per entry:
 
 <!-- entries below -->
 
+## 2026-08-19 — ele — library does not compile as a dependency (optional-dep struct expansion)
+
+**What happened:** First `mix deps.compile oapi_codemode` in ele after the
+Quicksand pin failed with `== Type checking failed with errors ==`.
+`Executor.ZapCode` pattern-matched `%ExZapcode.Exception{...}` in two
+clauses; struct expansion requires the module at compile time, and
+`ex_zapcode` is an optional dep (a *path* dep, even) that no consumer has,
+so Elixir 1.20's type checker hard-errors. It compiled in this repo only
+because ex_zapcode is present here. Plain remote calls to absent optional
+modules (`ExZapcode.start/2`, `Quicksand.eval/3`) only warn — the struct
+form is the one fatal construct.
+**What the library should do differently:** Never expand an optional dep's
+struct. Fixed here by matching `%{__struct__: ExZapcode.Exception, ...}` —
+a plain map pattern needing no module. A pre-hex-release check worth
+keeping: compile the library in a scratch project with NO optional deps.
+**Severity:** blocking
+**Resolved:** this commit
+
+## 2026-08-19 — ele — tool descriptions are executor-unaware (async dialect on a sync engine)
+
+**What happened:** `Tools.Descriptions` (and `Tools`' `@code_schema`) teach
+the async dialect — "Submit an async arrow function", `await`,
+`Promise.all` examples — but under `Executor.Quicksand` that dialect
+doesn't run: an async arrow returns an unresolved Promise, serialized as
+`{}`. ele pins its MCP tool descriptions statically (its architecture
+check requires it) and had tests asserting pinned == emitted; those had to
+be loosened to guard only the registry-derived lines, with the contract
+text forked to a sync version by hand. The Quicksand commit message
+already flags this follow-up; recording the concrete consumer cost.
+**What the library should do differently:** Make `definitions/1` ask the
+executor for its contract text (a `code_contract/0` callback on
+`OapiCodemode.Executor`, say) so descriptions and input-schema hints match
+the engine actually configured. Once emitted text is executor-correct, ele
+can return to pin-to-emitted verbatim (its preferred drift guard).
+**Severity:** annoying
+
 ## 2026-08-16 — gentility — schemeless specs cannot be credentialed
 
 **What happened:** Design phase for the gentility integration. Gentility's

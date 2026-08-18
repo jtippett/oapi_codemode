@@ -45,6 +45,36 @@ defmodule OapiCodemode.ToolsTest do
     assert result =~ ~s([{"path":"/pets"}])
   end
 
+  test ":executor_opts are forwarded to the executor for both tools", %{opts: opts} do
+    # Mock.run/3 ignores opts, so capture them via a spy executor. The
+    # handler invokes the executor in the calling process, so self() here
+    # is the test process.
+    defmodule OptsSpy do
+      @behaviour OapiCodemode.Executor
+      @impl true
+      def run(_code, _env, opts) do
+        send(self(), {:executor_opts, opts})
+        {:ok, %{value: nil, logs: []}}
+      end
+    end
+
+    opts =
+      opts
+      |> Keyword.put(:executor, OptsSpy)
+      |> Keyword.put(:executor_opts, limits: %{max_memory: 256_000_000})
+
+    [search, execute] = Tools.definitions(opts) |> Enum.sort_by(& &1.name, :desc)
+
+    assert {:ok, _} = search.handler.(%{"code" => "async () => null"}, %{})
+    assert_received {:executor_opts, received}
+    assert received[:limits] == %{max_memory: 256_000_000}
+    assert received[:timeout] == 30_000
+
+    assert {:ok, _} = execute.handler.(%{"code" => "async () => null"}, %{})
+    assert_received {:executor_opts, received}
+    assert received[:limits] == %{max_memory: 256_000_000}
+  end
+
   test "search sandbox gets no callbacks", %{opts: opts} do
     Mock.set_response(fn _code, env ->
       assert env.callbacks == %{}

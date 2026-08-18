@@ -11,6 +11,12 @@ defmodule OapiCodemode.Tools do
     * `:policy` — :read_only (default) or :all
     * `:max_result_tokens` — default 6000
     * `:timeout` — sandbox timeout ms, default 30_000
+    * `:executor_opts` — extra keyword opts forwarded verbatim to the
+      executor's `run/3` (e.g. `[limits: %{max_memory: 256_000_000}]` for
+      `Executor.ZapCode` — spec globals cost well over their JSON size in
+      the value-typed VM, so search over multi-MB specs needs more than
+      zapcode's 64MB default). `:timeout` above is merged in unless already
+      present here.
     * `:search_tool_name` — default "search_apis". Set a distinct name when a
       host emits per-API-instance tools.
     * `:execute_tool_name` — default "execute_api_code". A host that wants a
@@ -262,9 +268,10 @@ defmodule OapiCodemode.Tools do
   defp run_sandbox(opts, code, env) do
     executor = Keyword.fetch!(opts, :executor)
     timeout = Keyword.get(opts, :timeout, 30_000)
+    executor_opts = Keyword.get(opts, :executor_opts, [])
 
     try do
-      executor.run(code, env, timeout: timeout)
+      executor.run(code, env, Keyword.put_new(executor_opts, :timeout, timeout))
     rescue
       e -> {:error, {:raised, Exception.message(e)}}
     end

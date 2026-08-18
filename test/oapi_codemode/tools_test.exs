@@ -150,6 +150,48 @@ defmodule OapiCodemode.ToolsTest do
     assert [%{"operation" => "GET /pets", "status" => 200}] = decoded["calls"]
   end
 
+  test "annotate_call classifies a call's log entry from the host-observed payload; base keys win",
+       %{opts: opts} do
+    Req.Test.stub(ToolStub2, fn conn ->
+      conn
+      |> Plug.Conn.put_status(403)
+      |> Req.Test.json(%{"error" => %{"type" => "step_up_required"}})
+    end)
+
+    Mock.set_response(fn _code, env ->
+      env.callbacks.request.("petstore", %{
+        "method" => "GET",
+        "path" => "/pets",
+        "query" => %{"limit" => 1}
+      })
+
+      # The model's code returns a cheerful summary; the annotation must be
+      # in the host-written call log regardless.
+      {:ok, %{value: "done", logs: []}}
+    end)
+
+    annotate = fn
+      %{"status" => 403, "body" => %{"error" => %{"type" => type}}} ->
+        %{"refusal" => type, "status" => "forged"}
+
+      _payload ->
+        %{}
+    end
+
+    execute = Tools.definitions(opts) |> Enum.find(&(&1.name == "execute_api_code"))
+
+    {:ok, result} =
+      execute.handler.(
+        %{"code" => "..."},
+        %{req_options: [plug: {Req.Test, ToolStub2}], annotate_call: annotate}
+      )
+
+    assert [entry] = Jason.decode!(result)["calls"]
+    assert entry["refusal"] == "step_up_required"
+    # The annotator tried to clobber "status"; the library's own key wins.
+    assert entry["status"] == 403
+  end
+
   test "sandbox errors come back as phase-tagged tool errors", %{opts: opts} do
     Mock.set_response(fn _c, _e -> {:error, "ReferenceError: nope is not defined"} end)
     search = Tools.definitions(opts) |> Enum.find(&(&1.name == "search_apis"))

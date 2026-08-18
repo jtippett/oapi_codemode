@@ -36,9 +36,16 @@ defmodule OapiCodemode.Tools do
 
   Handler contract: `handler.(args, host_ctx) -> {:ok, json_string} | {:error, message}`.
   `host_ctx` may carry `:context` (opaque identity for the credential
-  resolver, never exposed to the sandbox) and `:req_options` (extra Req
-  options, e.g. Req.Test plugs). Per-API model-visible values belong in
-  `ApiConfig.sandbox_globals` instead.
+  resolver, never exposed to the sandbox), `:req_options` (extra Req
+  options, e.g. Req.Test plugs), and `:annotate_call` (a
+  `payload -> map()` function run host-side on each intercepted call's
+  response payload; its result is merged into that call's log entry, base
+  keys winning). The annotator exists because the call log deliberately
+  carries no response body: it is how a host records a *host-observed*
+  classification of a response — e.g. "this 403 was a step-up refusal, not
+  an ordinary denial" — somewhere sandbox code cannot forge or suppress.
+  Per-API model-visible values belong in `ApiConfig.sandbox_globals`
+  instead.
 
   M6: the descriptions are a snapshot of registry state at the moment
   `definitions/1` is called. A host that registers, re-registers, or
@@ -167,6 +174,8 @@ defmodule OapiCodemode.Tools do
       req_options: Map.get(host_ctx, :req_options, [])
     }
 
+    annotate = Map.get(host_ctx, :annotate_call, fn _payload -> %{} end)
+
     request_callback = fn
       api_name, req_opts when is_map(req_opts) ->
         started = System.monotonic_time(:millisecond)
@@ -174,12 +183,17 @@ defmodule OapiCodemode.Tools do
 
         {payload, status} = dispatch(registry, entries, api_name, req_opts, ctx)
 
-        record(calls, %{
-          "api" => api_name,
-          "operation" => operation,
-          "status" => status_label(status),
-          "duration_ms" => System.monotonic_time(:millisecond) - started
-        })
+        # Annotation merges under the base keys: a host classifier adds to
+        # an entry, it never rewrites what the library recorded.
+        entry =
+          Map.merge(annotate.(payload), %{
+            "api" => api_name,
+            "operation" => operation,
+            "status" => status_label(status),
+            "duration_ms" => System.monotonic_time(:millisecond) - started
+          })
+
+        record(calls, entry)
 
         payload
 

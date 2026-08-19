@@ -259,6 +259,68 @@ defmodule OapiCodemode.ToolsTest do
       assert later == before
     end
 
+    # ele P1 (round 5): a run that dies while a call is mid-dispatch — a
+    # wall-clock kill after the upstream accepted a mutation but before the
+    # response came back — must leave that call visible in the envelope as
+    # "in_flight", not silently omit it. An omitted landed mutation invites
+    # the model to replay it.
+    test "a run killed mid-dispatch leaves the in-flight call in the envelope", %{opts: opts} do
+      handler_pid = self()
+
+      Mock.set_response(fn _code, env ->
+        # The "sandbox" starts a request that blocks inside dispatch (the
+        # plug below signals us once it is executing), then the run dies
+        # with the callback still in flight — the SafeJS wall-clock kill
+        # shape.
+        caller = self()
+
+        {pid, mref} =
+          spawn_monitor(fn ->
+            payload =
+              env.callbacks.request.("petstore", %{
+                "method" => "GET",
+                "path" => "/pets",
+                "query" => %{"limit" => 1}
+              })
+
+            send(caller, {:payload, payload})
+          end)
+
+        assert caller == handler_pid
+
+        receive do
+          :in_dispatch -> :ok
+          {:payload, payload} -> raise "dispatch returned early: #{inspect(payload)}"
+          {:DOWN, ^mref, :process, ^pid, reason} -> raise "callback crashed: #{inspect(reason)}"
+        after
+          2_000 -> raise "the request callback never reached dispatch"
+        end
+
+        {:error, {:wall_clock, 123}}
+      end)
+
+      execute = Tools.definitions(opts) |> Enum.find(&(&1.name == "execute_api_code"))
+
+      blocked_plug = fn conn ->
+        send(handler_pid, :in_dispatch)
+        Process.sleep(5_000)
+        Req.Test.json(conn, %{})
+      end
+
+      assert {:ok, result} =
+               execute.handler.(%{"code" => "async () => ..."}, %{
+                 req_options: [plug: blocked_plug]
+               })
+
+      decoded = Jason.decode!(result)
+      assert decoded["error"] =~ "wall-clock"
+
+      assert [entry] = decoded["calls"]
+      assert entry["status"] == "in_flight"
+      assert entry["operation"] == "GET /pets"
+      assert entry["note"] =~ "outcome is unknown"
+    end
+
     # M9: the timeout branch has its own message shape, and (I1) still
     # surfaces the calls made before the timeout hit rather than discarding
     # them.

@@ -264,6 +264,16 @@ defmodule OapiCodemode.Tools do
             limit_error(max_calls)
 
           verdict ->
+            # ele P1 (round 5): the call is logged BEFORE dispatch as
+            # "in_flight" and finalized in place after, so a run that dies
+            # mid-call — a wall-clock kill, an executor crash — leaves the
+            # indeterminate call visible in the envelope instead of
+            # silently omitting a mutation that may have landed. A
+            # completed run never shows one: every dispatch that returns
+            # replaces its own placeholder.
+            ref = make_ref()
+            record(calls, ref, in_flight_entry(api_name, operation))
+
             {payload, status} =
               case verdict do
                 :dispatch -> dispatch(registry, metas, api_name, req_opts, ctx)
@@ -280,7 +290,7 @@ defmodule OapiCodemode.Tools do
                 "duration_ms" => System.monotonic_time(:millisecond) - started
               })
 
-            record(calls, entry)
+            finalize(calls, ref, entry)
 
             payload
         end
@@ -394,14 +404,42 @@ defmodule OapiCodemode.Tools do
   # run times out (the Deno executor kills the subprocess), but Elixir-side
   # Tasks already in flight can still land here after the Agent is gone.
   # Tolerate that rather than crashing a task nobody is waiting on.
-  defp record(agent, entry) do
-    Agent.update(agent, fn {reserved, entries} -> {reserved, [entry | entries]} end)
+  # Entries are keyed by ref so `finalize/3` can replace a call's
+  # "in_flight" placeholder in place; the envelope therefore lists calls
+  # in dispatch-start order.
+  defp record(agent, ref, entry) do
+    Agent.update(agent, fn {reserved, entries} -> {reserved, [{ref, entry} | entries]} end)
   catch
     :exit, _ -> :ok
   end
 
+  defp finalize(agent, ref, entry) do
+    Agent.update(agent, fn {reserved, entries} ->
+      {reserved,
+       Enum.map(entries, fn
+         {^ref, _placeholder} -> {ref, entry}
+         other -> other
+       end)}
+    end)
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp in_flight_entry(api_name, operation) do
+    %{
+      "api" => api_name,
+      "operation" => operation,
+      "status" => "in_flight",
+      "note" =>
+        "the run ended before this call returned — its outcome is unknown; " <>
+          "it may have completed. Verify before retrying."
+    }
+  end
+
   defp safe_get(agent) do
-    Agent.get(agent, fn {_reserved, entries} -> Enum.reverse(entries) end)
+    Agent.get(agent, fn {_reserved, entries} ->
+      entries |> Enum.reverse() |> Enum.map(fn {_ref, entry} -> entry end)
+    end)
   catch
     :exit, _ -> []
   end

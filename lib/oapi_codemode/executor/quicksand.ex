@@ -26,6 +26,22 @@ defmodule OapiCodemode.Executor.Quicksand do
   `globalThis` in a preamble. The `apis` object and a `console.log` capture
   shim are built in the same preamble.
 
+  ## Known upstream issue — timeout inside a pending promise job aborts the VM
+
+  Until quicksand ships rquickjs 0.12+
+  ([lpgauth/quicksand#2](https://github.com/lpgauth/quicksand/issues/2)),
+  guest code that schedules a promise job which is still *running* when the
+  timeout interrupt fires — e.g.
+  `() => { Promise.resolve().then(() => { while (true) {} }); return 1 }` —
+  aborts the whole node (SIGABRT from a `gc_decref_child` assertion when the
+  runtime is freed; rquickjs bug #663, fixed upstream in 0.12.0). The
+  unlinked worker below does **not** contain it: a native abort kills the
+  BEAM, not a process. Timeouts on the main eval, queued-but-unrun jobs, and
+  OOM inside jobs all fail cleanly. Consequence: do not point this executor
+  at adversarial input until the bump lands; there is deliberately no test
+  for this case (it would abort the suite) — the async test spec reverted on
+  2026-08-19 is the re-enable checklist.
+
   ## Isolation
 
   `run/3` runs each eval in an unlinked, monitored throwaway process. This is

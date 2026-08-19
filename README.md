@@ -205,9 +205,26 @@ The sandbox that runs the LLM-written JS sits behind the
 - **`OapiCodemode.Executor.Deno`** — available now. A real sandbox with no
   network access of its own, driven over a `Port` with a line-delimited
   JSON protocol. No Node/npm dependency; requires `deno` on `PATH`.
+- **`OapiCodemode.Executor.Quicksand`** — available now, behind the
+  optional dep `{:quicksand, "~> 0.1"}` (QuickJS-NG embedded as a Rustler
+  NIF, precompiled binaries — nothing to install in the image). The only
+  executor with a genuine hard memory cap: typed-array/`ArrayBuffer` bombs
+  that escape V8's heap limit under Deno come back as a structured
+  out-of-memory error here. **Synchronous contract**: guest code must be a
+  sync arrow and `apis.x.request(...)` blocks — no `async`/`await`, no
+  `Promise.all` — so tool descriptions must teach the sync dialect (see
+  the moduledoc). Known upstream issue: until quicksand bumps rquickjs to
+  0.12 ([lpgauth/quicksand#2](https://github.com/lpgauth/quicksand/issues/2)),
+  a timeout that lands inside a running promise job aborts the whole node —
+  don't run adversarial input on this executor until that release ships.
+- **`OapiCodemode.Executor.ZapCode`** — execute works end-to-end behind the
+  optional `ex_zapcode` dep, but search over real specs is engine-blocked
+  (container copy semantics make scans O(n²)), and it runs in-BEAM, so it's
+  for trusted/agent-authored code only.
 
 The `Executor` behaviour contract is stable; swapping executors doesn't
-change how you call `OapiCodemode.tools/1`.
+change how you call `OapiCodemode.tools/1` — but note the Quicksand sync
+dialect above when generating code.
 
 ## Design rationale
 

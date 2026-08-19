@@ -14,6 +14,11 @@ defmodule OapiCodemode.ApiConfig do
             # e.g. ["idempotency-key"]. Anything not listed is a policy error,
             # and credential/library headers are reserved even when listed.
             passthrough_headers: [],
+            # extra RESPONSE header names surfaced to the sandbox for this API
+            # (case-insensitive), on top of the built-in whitelist
+            # (content-type, x-request-id, retry-after, x-ratelimit-*) — e.g.
+            # ["idempotent-replayed"] so the model can see a dedup marker.
+            response_headers: [],
             # per-API Req options (e.g. egress proxy connect_options), appended before
             # call-time host_ctx.req_options: for scalar options (e.g. :connect_options,
             # :redirect) call-time wins on conflict; :headers and :params are MERGED

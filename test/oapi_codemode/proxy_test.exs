@@ -265,6 +265,35 @@ defmodule OapiCodemode.ProxyTest do
     refute Map.has_key?(resp.headers, "x-secret-internal")
   end
 
+  # ele: idempotency round-trips are only useful if the model can SEE the
+  # upstream's replay marker. `ApiConfig.response_headers` extends the
+  # built-in response-header whitelist per API (case-insensitive).
+  test "config.response_headers surfaces extra response headers to the sandbox", %{
+    entry: entry,
+    ctx: ctx
+  } do
+    stub = fn conn ->
+      conn
+      |> Plug.Conn.put_resp_header("idempotent-replayed", "true")
+      |> Req.Test.json(%{"ok" => true})
+    end
+
+    Req.Test.stub(OapiCodemodeStub, stub)
+
+    req = %{"method" => "GET", "path" => "/pets", "query" => %{"limit" => 1}}
+
+    # Not whitelisted by default.
+    {:ok, resp} = Proxy.request(entry, "petstore", req, ctx)
+    refute Map.has_key?(resp.headers, "idempotent-replayed")
+
+    # Opted in per API — matched case-insensitively, surfaced downcased.
+    entry = %{entry | config: %{entry.config | response_headers: ["Idempotent-Replayed"]}}
+
+    Req.Test.stub(OapiCodemodeStub, stub)
+    {:ok, resp} = Proxy.request(entry, "petstore", req, ctx)
+    assert resp.headers["idempotent-replayed"] == "true"
+  end
+
   test "emits telemetry", %{entry: entry, ctx: ctx} do
     ref = :telemetry_test.attach_event_handlers(self(), [[:oapi_codemode, :request, :stop]])
 

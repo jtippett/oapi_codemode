@@ -302,7 +302,7 @@ defmodule OapiCodemode.Proxy do
           {:ok,
            %{
              status: resp.status,
-             headers: whitelist_headers(resp.headers),
+             headers: whitelist_headers(resp.headers, config),
              body: cap_body(resp.body, config.max_response_bytes)
            }}
 
@@ -419,11 +419,13 @@ defmodule OapiCodemode.Proxy do
 
   # I4: a map, matching the `Record<string, string>` the execute tool
   # declares. Repeated headers (set-cookie-ish) join with ", " per RFC 9110.
-  defp whitelist_headers(headers) do
+  defp whitelist_headers(headers, config) do
+    extra = Enum.map(config.response_headers, &String.downcase/1)
+
     headers
     |> Enum.flat_map(fn {k, vs} -> Enum.map(List.wrap(vs), &{String.downcase(k), &1}) end)
     |> Enum.filter(fn {k, _} ->
-      k in @response_header_whitelist or
+      k in @response_header_whitelist or k in extra or
         Enum.any?(@response_header_prefixes, &String.starts_with?(k, &1))
     end)
     |> Enum.reduce(%{}, fn {k, v}, acc -> Map.update(acc, k, v, &(&1 <> ", " <> v)) end)

@@ -112,5 +112,28 @@ defmodule OapiCodemode.RegistryTest do
     test "empty registry yields an empty meta list", %{reg: reg} do
       assert Registry.sandbox_meta(reg) == []
     end
+
+    test "carries the auto_idempotency_header, downcased", %{reg: reg, art: art} do
+      :ok =
+        Registry.register(reg, "petstore", art, %ApiConfig{
+          auto_idempotency_header: "Idempotency-Key"
+        })
+
+      assert [{"petstore", meta}] = Registry.sandbox_meta(reg)
+      assert meta.auto_idempotency_header == "idempotency-key"
+    end
+  end
+
+  # A reserved header (authorization, cookie, content-type, ...) as the
+  # idempotency header would collide with credential attach or the body
+  # encoder — a host config bug, rejected at registration.
+  test "register rejects a reserved auto_idempotency_header", %{reg: reg, art: art} do
+    assert {:error, {:invalid_idempotency_header, "Authorization"}} =
+             Registry.register(reg, "petstore", art, %ApiConfig{
+               auto_idempotency_header: "Authorization"
+             })
+
+    assert {:error, {:invalid_idempotency_header, ""}} =
+             Registry.register(reg, "petstore", art, %ApiConfig{auto_idempotency_header: ""})
   end
 end

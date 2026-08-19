@@ -249,50 +249,65 @@ defmodule OapiCodemode.Tools do
     annotate = Map.get(host_ctx, :annotate_call, fn _payload -> %{} end)
 
     max_calls = max_calls(opts)
+    meta_by_name = Map.new(metas)
 
     request_callback = fn
       api_name, req_opts when is_map(req_opts) ->
-        started = System.monotonic_time(:millisecond)
-        operation = operation_label(req_opts)
+        # The key is resolved BEFORE the in_flight record below — an
+        # in_flight entry must carry its key, or a killed run loses the one
+        # thing that makes its retry safe. A malformed supply is an M4-style
+        # shape error: no slot, no log entry.
+        case idempotency(meta_by_name[api_name], req_opts) do
+          {:error, message} ->
+            %{"error" => message}
 
-        # ele P1: bound the number of calls per run. The first over-limit
-        # attempt is recorded so the operator sees it; further attempts get
-        # the error payload WITHOUT a log entry — otherwise refusals would
-        # re-open the unbounded call-log growth the limit exists to close.
-        case reserve_call(calls, max_calls) do
-          :drop ->
-            limit_error(max_calls)
+          {:ok, req_opts, idem_key} ->
+            started = System.monotonic_time(:millisecond)
+            operation = operation_label(req_opts)
 
-          verdict ->
-            # ele P1 (round 5): the call is logged BEFORE dispatch as
-            # "in_flight" and finalized in place after, so a run that dies
-            # mid-call — a wall-clock kill, an executor crash — leaves the
-            # indeterminate call visible in the envelope instead of
-            # silently omitting a mutation that may have landed. A
-            # completed run never shows one: every dispatch that returns
-            # replaces its own placeholder.
-            ref = make_ref()
-            record(calls, ref, in_flight_entry(api_name, operation))
+            # ele P1: bound the number of calls per run. The first over-limit
+            # attempt is recorded so the operator sees it; further attempts get
+            # the error payload WITHOUT a log entry — otherwise refusals would
+            # re-open the unbounded call-log growth the limit exists to close.
+            case reserve_call(calls, max_calls) do
+              :drop ->
+                limit_error(max_calls)
 
-            {payload, status} =
-              case verdict do
-                :dispatch -> dispatch(registry, metas, api_name, req_opts, ctx)
-                :record_refusal -> {limit_error(max_calls), :error}
-              end
+              verdict ->
+                # ele P1 (round 5): the call is logged BEFORE dispatch as
+                # "in_flight" and finalized in place after, so a run that dies
+                # mid-call — a wall-clock kill, an executor crash — leaves the
+                # indeterminate call visible in the envelope instead of
+                # silently omitting a mutation that may have landed. A
+                # completed run never shows one: every dispatch that returns
+                # replaces its own placeholder.
+                ref = make_ref()
+                record(calls, ref, in_flight_entry(api_name, operation, idem_key))
 
-            # Annotation merges under the base keys: a host classifier adds
-            # to an entry, it never rewrites what the library recorded.
-            entry =
-              Map.merge(annotate.(payload), %{
-                "api" => api_name,
-                "operation" => operation,
-                "status" => status_label(status),
-                "duration_ms" => System.monotonic_time(:millisecond) - started
-              })
+                {payload, status} =
+                  case verdict do
+                    :dispatch -> dispatch(registry, metas, api_name, req_opts, ctx)
+                    :record_refusal -> {limit_error(max_calls), :error}
+                  end
 
-            finalize(calls, ref, entry)
+                # Annotation merges under the base keys: a host classifier adds
+                # to an entry, it never rewrites what the library recorded.
+                entry =
+                  Map.merge(
+                    annotate.(payload),
+                    %{
+                      "api" => api_name,
+                      "operation" => operation,
+                      "status" => status_label(status),
+                      "duration_ms" => System.monotonic_time(:millisecond) - started
+                    }
+                    |> put_key(idem_key)
+                  )
 
-            payload
+                finalize(calls, ref, entry)
+
+                payload
+            end
         end
 
       # M4: `apis.x.request("GET /pets")` — a shape mistake the model can fix.
@@ -425,7 +440,7 @@ defmodule OapiCodemode.Tools do
     :exit, _ -> :ok
   end
 
-  defp in_flight_entry(api_name, operation) do
+  defp in_flight_entry(api_name, operation, idem_key) do
     %{
       "api" => api_name,
       "operation" => operation,
@@ -434,6 +449,81 @@ defmodule OapiCodemode.Tools do
         "the run ended before this call returned — its outcome is unknown; " <>
           "it may have completed. Verify before retrying."
     }
+    |> put_key(idem_key)
+  end
+
+  defp put_key(entry, nil), do: entry
+  defp put_key(entry, key), do: Map.put(entry, "idempotency_key", key)
+
+  # James (via ele): the model shouldn't have to hand-write idempotency
+  # headers. With ApiConfig.auto_idempotency_header set, precedence is
+  # explicit idempotencyKey option > explicit headers-map entry > generated
+  # UUID (mutating calls only). Whatever key is used is returned for the
+  # call log; GET/HEAD are never auto-keyed.
+  defp idempotency(meta, req_opts) do
+    header = meta && meta.auto_idempotency_header
+    {option, req_opts} = Map.pop(req_opts, "idempotencyKey")
+    from_headers = header_supplied_key(req_opts, header)
+
+    cond do
+      option == nil and from_headers != nil ->
+        {:ok, req_opts, from_headers}
+
+      option == nil and header != nil and mutating?(req_opts) ->
+        key = generate_key()
+        {:ok, put_key_header(req_opts, header, key), key}
+
+      option == nil ->
+        {:ok, req_opts, nil}
+
+      header == nil ->
+        {:error,
+         "idempotencyKey is not supported here: this API has no idempotency header configured"}
+
+      not is_binary(option) ->
+        {:error, "idempotencyKey must be a string"}
+
+      from_headers != nil ->
+        {:error,
+         "provide the idempotency key once — either idempotencyKey or headers[#{inspect(header)}]"}
+
+      true ->
+        {:ok, put_key_header(req_opts, header, option), option}
+    end
+  end
+
+  defp header_supplied_key(_req_opts, nil), do: nil
+
+  defp header_supplied_key(req_opts, header) do
+    case Map.get(req_opts, "headers") do
+      headers when is_map(headers) ->
+        Enum.find_value(headers, fn {name, value} ->
+          if is_binary(name) and String.downcase(name) == header, do: value
+        end)
+
+      _ ->
+        nil
+    end
+  end
+
+  defp mutating?(req_opts) do
+    method = req_opts |> Map.get("method", "GET") |> to_string() |> String.upcase()
+    method not in ["GET", "HEAD"]
+  end
+
+  defp put_key_header(req_opts, header, key) do
+    Map.update(req_opts, "headers", %{header => key}, fn
+      headers when is_map(headers) -> Map.put(headers, header, key)
+      other -> other
+    end)
+  end
+
+  defp generate_key do
+    <<u0::48, _::4, u1::12, _::2, u2::62>> = :crypto.strong_rand_bytes(16)
+    <<a::32, b::16, c::16, d::16, e::48>> = <<u0::48, 4::4, u1::12, 2::2, u2::62>>
+
+    :io_lib.format("~8.16.0b-~4.16.0b-~4.16.0b-~4.16.0b-~12.16.0b", [a, b, c, d, e])
+    |> IO.iodata_to_binary()
   end
 
   defp safe_get(agent) do

@@ -87,7 +87,7 @@ defmodule OapiCodemode.Tools.Descriptions do
       query?: Record<string, unknown>;
       body?: unknown;
       contentType?: string;                // default application/json when body present
-      rawBody?: boolean;                   // send body as-is, no JSON.stringify#{headers_field(entries)}
+      rawBody?: boolean;                   // send body as-is, no JSON.stringify#{headers_field(entries)}#{idempotency_field(entries)}
     }
 
     interface Response { status: number; headers: Record<string, string>; body: unknown; }
@@ -100,7 +100,7 @@ defmodule OapiCodemode.Tools.Descriptions do
 
     Your code must be an async arrow function that returns the result.
     Promise.all over several requests is fine (they may execute serially).
-    #{headers_paragraph(entries)}
+    #{headers_paragraph(entries)}#{idempotency_paragraph(entries)}
     Example:
     async () => {
       const r = await apis.petstore.request({ method: "GET", path: "/pets", query: { limit: 10 } });
@@ -147,6 +147,34 @@ defmodule OapiCodemode.Tools.Descriptions do
           Enum.join(names, ", ") <>
           ". Any other name is rejected before the request is sent.\n"
     end
+  end
+
+  # Auto idempotency (James via ele): the model writes nothing in the
+  # normal path — mutations are keyed automatically and the key lands in
+  # the call log; idempotencyKey exists to REUSE a logged key on a retry
+  # whose outcome was unknown. Only advertised when some API configures it.
+  defp idempotency_field(entries) do
+    if idempotency_configured?(entries) do
+      "\n  idempotencyKey?: string;             // only to RETRY: reuse a logged key"
+    else
+      ""
+    end
+  end
+
+  defp idempotency_paragraph(entries) do
+    if idempotency_configured?(entries) do
+      "\nMutating calls are automatically idempotency-keyed; each call's key " <>
+        "appears in the result's call log as \"idempotency_key\". To retry a " <>
+        "call whose outcome is unknown (status \"in_flight\"), pass that logged " <>
+        "key back via idempotencyKey — the upstream will dedupe. Never invent " <>
+        "your own key.\n"
+    else
+      ""
+    end
+  end
+
+  defp idempotency_configured?(entries) do
+    Enum.any?(entries, fn {_, entry} -> entry.config.auto_idempotency_header end)
   end
 
   # Downcased for display — the proxy matches case-insensitively and

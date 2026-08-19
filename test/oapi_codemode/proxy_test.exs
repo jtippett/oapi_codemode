@@ -1026,6 +1026,32 @@ defmodule OapiCodemode.ProxyTest do
       assert msg2 =~ "string"
     end
 
+    test "the auto idempotency header is implicitly passthrough-allowed", %{
+      entry: entry,
+      ctx: ctx
+    } do
+      Req.Test.stub(OapiCodemodeStub, fn conn ->
+        assert Plug.Conn.get_req_header(conn, "idempotency-key") == ["k-1"]
+        Req.Test.json(conn, %{})
+      end)
+
+      # passthrough_headers stays [] — configuring the auto header is the opt-in.
+      entry = %{entry | config: %{entry.config | auto_idempotency_header: "idempotency-key"}}
+
+      assert {:ok, %{status: 200}} =
+               Proxy.request(
+                 entry,
+                 "petstore",
+                 %{
+                   "method" => "GET",
+                   "path" => "/pets",
+                   "query" => %{"limit" => 5},
+                   "headers" => %{"idempotency-key" => "k-1"}
+                 },
+                 ctx
+               )
+    end
+
     test "two spellings collapsing to one header name are rejected", %{entry: entry, ctx: ctx} do
       entry = with_passthrough(entry, ["idempotency-key"])
 

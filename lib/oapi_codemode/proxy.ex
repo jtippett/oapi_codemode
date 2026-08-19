@@ -86,13 +86,21 @@ defmodule OapiCodemode.Proxy do
   @reserved_headers ~w(authorization proxy-authorization cookie content-type
                        content-length host transfer-encoding connection)
 
+  @doc false
+  def reserved_header?(name), do: name in @reserved_headers
+
   defp passthrough_headers(config, opts) do
     case Map.get(opts, "headers") do
       nil ->
         {:ok, []}
 
       headers when is_map(headers) ->
-        take_allowed(headers, config.passthrough_headers)
+        # Configuring auto_idempotency_header IS the opt-in for that name —
+        # explicit supply must not additionally require passthrough_headers.
+        take_allowed(
+          headers,
+          config.passthrough_headers ++ List.wrap(config.auto_idempotency_header)
+        )
 
       _other ->
         {:error, %{phase: :policy, message: "headers must be an object of string values"}}

@@ -63,6 +63,28 @@ defmodule OapiCodemode.Tools.DescriptionsTest do
              "Per-call headers: only these header names are allowed — idempotency-key"
   end
 
+  # Auto idempotency: when configured, the model must be taught that
+  # mutations are keyed automatically, that the key is in the call log, and
+  # that idempotencyKey is how to reuse a logged key on retry. When no API
+  # configures it, none of that text (or the option) may appear.
+  test "execute description teaches auto idempotency only when configured", %{
+    reg: reg,
+    art: art
+  } do
+    without = Descriptions.execute(Registry.list(reg))
+    refute without =~ "idempotencyKey"
+
+    :ok =
+      Registry.register(reg, "billing", art, %ApiConfig{
+        auto_idempotency_header: "idempotency-key"
+      })
+
+    with_idem = Descriptions.execute(Registry.list(reg))
+    assert with_idem =~ "idempotencyKey?: string"
+    assert with_idem =~ "automatically"
+    assert with_idem =~ "call log"
+  end
+
   # I2: with per-instance tool naming (e.g. stripe_api_search/execute
   # trios), the description must name the ACTUAL paired search tool, not a
   # generic "the search tool" — otherwise the model can pair the wrong

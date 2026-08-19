@@ -39,12 +39,26 @@ defmodule OapiCodemode.Registry do
   @spec register(GenServer.server(), String.t(), Artifact.t(), ApiConfig.t()) ::
           :ok | {:error, {:invalid_api_name, term()} | :no_base_url}
   def register(server, api_name, %Artifact{} = artifact, %ApiConfig{} = config) do
-    if is_binary(api_name) and Regex.match?(@api_name_re, api_name) do
-      GenServer.call(server, {:register, api_name, artifact, config})
-    else
-      {:error, {:invalid_api_name, api_name}}
+    cond do
+      not (is_binary(api_name) and Regex.match?(@api_name_re, api_name)) ->
+        {:error, {:invalid_api_name, api_name}}
+
+      not valid_idempotency_header?(config.auto_idempotency_header) ->
+        {:error, {:invalid_idempotency_header, config.auto_idempotency_header}}
+
+      true ->
+        GenServer.call(server, {:register, api_name, artifact, config})
     end
   end
+
+  # A reserved header (authorization, content-type, ...) as the idempotency
+  # header would collide with credential attach or the body encoder.
+  defp valid_idempotency_header?(nil), do: true
+
+  defp valid_idempotency_header?(name) when is_binary(name) and name != "",
+    do: not OapiCodemode.Proxy.reserved_header?(String.downcase(name))
+
+  defp valid_idempotency_header?(_), do: false
 
   @spec lookup(GenServer.server(), String.t()) :: {:ok, %Entry{}} | {:error, :unknown_api}
   def lookup(server, api_name) do
@@ -72,7 +86,12 @@ defmodule OapiCodemode.Registry do
   which costs tens of ms per call on multi-MB specs.
   """
   @spec sandbox_meta(GenServer.server()) :: [
-          {String.t(), %{spec_json: String.t(), sandbox_globals: map()}}
+          {String.t(),
+           %{
+             spec_json: String.t(),
+             sandbox_globals: map(),
+             auto_idempotency_header: String.t() | nil
+           }}
         ]
   def sandbox_meta(server) do
     server
@@ -93,12 +112,18 @@ defmodule OapiCodemode.Registry do
         {:reply, {:error, :no_base_url}, state}
 
       base_url ->
-        config = %{config | base_url: base_url}
+        config = %{
+          config
+          | base_url: base_url,
+            auto_idempotency_header: downcase_or_nil(config.auto_idempotency_header)
+        }
+
         entry = %Entry{artifact: artifact, config: config}
 
         meta = %{
           spec_json: Jason.encode!(artifact.spec),
-          sandbox_globals: config.sandbox_globals
+          sandbox_globals: config.sandbox_globals,
+          auto_idempotency_header: config.auto_idempotency_header
         }
 
         :ets.insert(state.table, {name, entry, meta})
@@ -110,4 +135,7 @@ defmodule OapiCodemode.Registry do
 
   defp resolve_base_url(artifact, config),
     do: config.base_url || artifact.default_base_url
+
+  defp downcase_or_nil(nil), do: nil
+  defp downcase_or_nil(name), do: String.downcase(name)
 end

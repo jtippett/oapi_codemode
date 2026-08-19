@@ -804,6 +804,221 @@ defmodule OapiCodemode.ToolsTest do
     end
   end
 
+  # James (via ele): making the model write idempotency headers is a bit
+  # much. With ApiConfig.auto_idempotency_header set, mutating calls are
+  # keyed automatically; the key (auto or explicit) is recorded in the
+  # host-written call log so a retry-after-ambiguity can reuse it — the
+  # in_flight pairing below is the load-bearing part.
+  describe "auto idempotency keys" do
+    @uuid_re ~r/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+
+    setup %{reg: reg, opts: opts} do
+      {:ok, art} = Ingest.ingest(Fixtures.clean_3_1())
+
+      :ok =
+        Registry.register(reg, "idem", art, %ApiConfig{
+          auto_idempotency_header: "idempotency-key"
+        })
+
+      %{opts: Keyword.put(opts, :policy, :all)}
+    end
+
+    defp run_execute(opts, code_opts, host_ctx) do
+      Mock.set_response(fn _code, env ->
+        {:ok, %{value: env.callbacks.request.(code_opts.api, code_opts.req), logs: []}}
+      end)
+
+      execute = Tools.definitions(opts) |> Enum.find(&(&1.name == "execute_api_code"))
+      {:ok, result} = execute.handler.(%{"code" => "..."}, host_ctx)
+      Jason.decode!(result)
+    end
+
+    test "a mutating call without a key gets a generated one, sent and logged", %{opts: opts} do
+      test_pid = self()
+
+      plug = fn conn ->
+        send(test_pid, {:key_header, Plug.Conn.get_req_header(conn, "idempotency-key")})
+        Req.Test.json(conn, %{})
+      end
+
+      decoded =
+        run_execute(
+          opts,
+          %{
+            api: "idem",
+            req: %{
+              "method" => "POST",
+              "path" => "/pets",
+              "body" => %{"name" => "R", "species" => "dog"}
+            }
+          },
+          %{req_options: [plug: plug]}
+        )
+
+      assert_received {:key_header, [sent_key]}
+      assert sent_key =~ @uuid_re
+      assert [%{"idempotency_key" => ^sent_key, "status" => 200}] = decoded["calls"]
+    end
+
+    test "a GET is not keyed", %{opts: opts} do
+      test_pid = self()
+
+      plug = fn conn ->
+        send(test_pid, {:key_header, Plug.Conn.get_req_header(conn, "idempotency-key")})
+        Req.Test.json(conn, %{})
+      end
+
+      decoded =
+        run_execute(
+          opts,
+          %{
+            api: "idem",
+            req: %{"method" => "GET", "path" => "/pets", "query" => %{"limit" => 1}}
+          },
+          %{req_options: [plug: plug]}
+        )
+
+      assert_received {:key_header, []}
+      assert [entry] = decoded["calls"]
+      refute Map.has_key?(entry, "idempotency_key")
+    end
+
+    test "an explicit idempotencyKey option is forwarded verbatim and logged", %{opts: opts} do
+      test_pid = self()
+
+      plug = fn conn ->
+        send(test_pid, {:key_header, Plug.Conn.get_req_header(conn, "idempotency-key")})
+        Req.Test.json(conn, %{})
+      end
+
+      decoded =
+        run_execute(
+          opts,
+          %{
+            api: "idem",
+            req: %{
+              "method" => "POST",
+              "path" => "/pets",
+              "body" => %{"name" => "R", "species" => "dog"},
+              "idempotencyKey" => "my-key-1"
+            }
+          },
+          %{req_options: [plug: plug]}
+        )
+
+      assert_received {:key_header, ["my-key-1"]}
+      assert [%{"idempotency_key" => "my-key-1"}] = decoded["calls"]
+    end
+
+    test "a key supplied via the headers map is honored, not regenerated", %{opts: opts} do
+      test_pid = self()
+
+      plug = fn conn ->
+        send(test_pid, {:key_header, Plug.Conn.get_req_header(conn, "idempotency-key")})
+        Req.Test.json(conn, %{})
+      end
+
+      decoded =
+        run_execute(
+          opts,
+          %{
+            api: "idem",
+            req: %{
+              "method" => "POST",
+              "path" => "/pets",
+              "body" => %{"name" => "R", "species" => "dog"},
+              "headers" => %{"Idempotency-Key" => "hdr-key"}
+            }
+          },
+          %{req_options: [plug: plug]}
+        )
+
+      assert_received {:key_header, ["hdr-key"]}
+      assert [%{"idempotency_key" => "hdr-key"}] = decoded["calls"]
+    end
+
+    test "idempotencyKey on an API with no configured header is an actionable error, not a call",
+         %{opts: opts} do
+      decoded =
+        run_execute(
+          opts,
+          %{
+            api: "petstore",
+            req: %{"method" => "GET", "path" => "/pets", "idempotencyKey" => "k"}
+          },
+          %{}
+        )
+
+      assert decoded["result"]["error"] =~ "no idempotency header"
+      assert decoded["calls"] == []
+    end
+
+    test "supplying the key twice (option and headers map) is an error", %{opts: opts} do
+      decoded =
+        run_execute(
+          opts,
+          %{
+            api: "idem",
+            req: %{
+              "method" => "POST",
+              "path" => "/pets",
+              "idempotencyKey" => "a",
+              "headers" => %{"idempotency-key" => "b"}
+            }
+          },
+          %{}
+        )
+
+      assert decoded["result"]["error"] =~ "once"
+      assert decoded["calls"] == []
+    end
+
+    # The load-bearing pairing: a run killed mid-mutation leaves an
+    # in_flight entry CARRYING ITS KEY, so the model knows exactly what to
+    # resend for a safe, deduped retry.
+    test "an in_flight entry carries the auto-generated key", %{opts: opts} do
+      handler_pid = self()
+
+      Mock.set_response(fn _code, env ->
+        caller = self()
+
+        spawn_monitor(fn ->
+          env.callbacks.request.("idem", %{
+            "method" => "POST",
+            "path" => "/pets",
+            "body" => %{"name" => "R", "species" => "dog"}
+          })
+        end)
+
+        assert caller == handler_pid
+
+        receive do
+          :in_dispatch -> :ok
+        after
+          2_000 -> raise "the request callback never reached dispatch"
+        end
+
+        {:error, {:wall_clock, 123}}
+      end)
+
+      blocked_plug = fn conn ->
+        send(handler_pid, :in_dispatch)
+        Process.sleep(5_000)
+        Req.Test.json(conn, %{})
+      end
+
+      execute = Tools.definitions(opts) |> Enum.find(&(&1.name == "execute_api_code"))
+
+      {:ok, result} =
+        execute.handler.(%{"code" => "..."}, %{req_options: [plug: blocked_plug]})
+
+      decoded = Jason.decode!(result)
+      assert [entry] = decoded["calls"]
+      assert entry["status"] == "in_flight"
+      assert entry["idempotency_key"] =~ @uuid_re
+    end
+  end
+
   describe "search_tool_name/execute_tool_name collision guard (M1)" do
     test "raises when the two names collide via explicit execute_tool_name", %{opts: opts} do
       bad_opts = Keyword.put(opts, :execute_tool_name, "search_apis")

@@ -14,6 +14,15 @@ defmodule OapiCodemode.ApiConfig do
             # e.g. ["idempotency-key"]. Anything not listed is a policy error,
             # and credential/library headers are reserved even when listed.
             passthrough_headers: [],
+            # when set (e.g. "idempotency-key"), every mutating call
+            # (non-GET/HEAD) that doesn't supply a key gets a proxy-generated
+            # UUID v4 in this header; the key used (auto or explicit) is
+            # recorded in the call log as "idempotency_key". Sandbox code can
+            # supply its own via the idempotencyKey request option (or the
+            # headers map — this name is implicitly passthrough-allowed).
+            # Stored downcased; reserved header names are rejected at
+            # registration.
+            auto_idempotency_header: nil,
             # extra RESPONSE header names surfaced to the sandbox for this API
             # (case-insensitive), on top of the built-in whitelist
             # (content-type, x-request-id, retry-after, x-ratelimit-*) — e.g.

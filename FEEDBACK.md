@@ -15,6 +15,32 @@ Format per entry:
 
 <!-- entries below -->
 
+## 2026-08-19 — ele (design request from James) — hand-written idempotency headers are too much to ask of the model
+
+**What happened:** With passthrough + response_headers in place the
+idempotency loop worked, but only if the model remembered to generate and
+send a key on every mutation — "making them write headers is a bit much"
+(James). In practice the only case that NEEDS a key the model can reason
+about is retry-after-ambiguity, and that case needs the key of the
+*original* attempt, which nothing recorded.
+**What the library should do differently:** Key mutations automatically
+and record the key where retries can find it.
+**Severity:** annoying
+**Resolved:** this commit — `ApiConfig.auto_idempotency_header` (e.g.
+"idempotency-key"; reserved names rejected at registration): every
+mutating call without an explicit key gets a proxy-generated UUID v4 in
+that header; the key used (auto or explicit) is recorded in the call-log
+entry as `"idempotency_key"` — including on `in_flight` entries, which is
+the load-bearing pairing: a killed run's indeterminate mutation carries
+exactly the key to resend. First-class `idempotencyKey` request option as
+explicit-supply sugar (precedence: option > headers-map entry > auto;
+supplying both is an error; the configured header is implicitly
+passthrough-allowed). Descriptions teach it only when configured, framed
+as reuse-a-logged-key-to-retry, never invent-your-own. Semantics verified
+ele-side: unique-per-attempt keys never dedupe intentional repeats;
+same-key retry after a step-up executes fresh; a killed-mid-request row
+409s fail-closed.
+
 ## 2026-08-19 — ele — response-header whitelist hides the idempotent-replay marker
 
 **What happened:** Adopting header passthrough for idempotency keys in

@@ -15,6 +15,30 @@ Format per entry:
 
 <!-- entries below -->
 
+## 2026-08-19 — ele — a killed run's envelope omits mutations that already landed
+
+**What happened:** Follow-on from the wall-clock entry below, caught by
+ele's review of the fix: the call log recorded a call only AFTER
+`dispatch` returned. A wall-clock kill (or executor crash) landing while
+a mutation was in flight — upstream accepted the write, response not yet
+back — produced a timeout envelope with no record of that call. The
+model's only history of what a run did is the envelope, so an omitted
+landed mutation reads as "never attempted" and invites a replay, which
+without idempotency keys duplicates a real write. The I1 principle
+("mutations may have landed before the crash — the tool result must show
+what the code actually did") was stated but not upheld across the
+in-flight window.
+**What the library should do differently:** Record before dispatch,
+finalize after. Fixed — each call now logs an `"in_flight"` placeholder
+(keyed by ref) before dispatch and is replaced in place with the final
+entry when dispatch returns; a run that dies mid-call leaves
+`{"status": "in_flight", "note": "...outcome is unknown... Verify before
+retrying."}` in the envelope. Completed runs never show one. Envelope
+order became dispatch-start order as a side effect. Regression test:
+"a run killed mid-dispatch leaves the in-flight call in the envelope".
+**Severity:** blocking (for mutation-capable hosts)
+**Resolved:** this commit
+
 ## 2026-08-19 — ele — SafeJS compute-budget timeout reopens the unbounded-callback-traffic bug class
 
 **What happened:** Adopting `Executor.SafeJS` in ele (swapping off

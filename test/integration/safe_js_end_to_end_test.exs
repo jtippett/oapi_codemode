@@ -5,8 +5,9 @@ defmodule OapiCodemode.SafeJSEndToEndTest do
   bare plug closure (see the Req.Test process-scoping notes in
   `end_to_end_test.exs`).
 
-  SYNCHRONOUS contract: guest code is a plain arrow and `apis.x.request(...)`
-  is a blocking call — no `await`, no `Promise.all` (see `Executor.SafeJS`).
+  Dialect: same async arrow as Deno since ex_safejs 0.3.0 — `await` and
+  `Promise.all` work (requests resolve serially), and `apis.x.request(...)`
+  also works as a plain blocking call (see `Executor.SafeJS`).
   """
 
   use ExUnit.Case, async: true

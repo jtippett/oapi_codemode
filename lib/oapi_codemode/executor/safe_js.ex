@@ -136,10 +136,12 @@ defmodule OapiCodemode.Executor.SafeJS do
 
   defp to_result({:ok, value}, _timeout), do: {:ok, %{value: value, logs: logs()}}
 
-  defp to_result({:error, %ExSafejs.Error{kind: :timeout}}, timeout),
+  # Plain-map __struct__ matches, not %ExSafejs.Error{} — struct expansion
+  # would break compilation for consumers without the optional dep.
+  defp to_result({:error, %{__struct__: ExSafejs.Error, kind: :timeout}}, timeout),
     do: {:error, {:timeout, timeout}}
 
-  defp to_result({:error, %ExSafejs.Error{message: message}}, _timeout) do
+  defp to_result({:error, %{__struct__: ExSafejs.Error, message: message}}, _timeout) do
     {:error, %{message: first_line(message), logs: logs()}}
   end
 

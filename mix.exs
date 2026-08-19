@@ -36,8 +36,13 @@ defmodule OapiCodemode.MixProject do
       # goes away with the hex pin above.
       {:rustler, ">= 0.0.0", optional: true},
       # Optional: only needed for OapiCodemode.Executor.SafeJS (QuickJS-NG, our
-      # hard fork of quicksand).
-      {:ex_safejs, github: "jtippett/ex_safejs", optional: true},
+      # hard fork of quicksand). Ref = v0.3.1 + its precompiled-NIF checksums
+      # commit (the tag itself predates the checksum file rustler_precompiled
+      # needs). Becomes {:ex_safejs, "~> 0.3.1", optional: true} once on hex.
+      {:ex_safejs,
+       github: "jtippett/ex_safejs",
+       ref: "a4d2503e89951f22faa6bbbc043af02d4ab38cf0",
+       optional: true},
       {:req, "~> 0.5"},
       {:telemetry, "~> 1.2"},
       {:plug, "~> 1.16", only: :test}

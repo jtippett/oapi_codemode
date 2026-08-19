@@ -1,14 +1,24 @@
 defmodule OapiCodemode.MixProject do
   use Mix.Project
 
+  @version "0.1.0"
+  @source_url "https://github.com/jtippett/oapi_codemode"
+
   def project do
     [
       app: :oapi_codemode,
-      version: "0.1.0",
+      version: @version,
       elixir: "~> 1.17",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
-      deps: deps()
+      deps: deps(),
+      description:
+        "OpenAPI search-and-execute tools for LLM agents, Cloudflare " <>
+          "code-mode style — the sandbox never sees your credentials",
+      package: package(),
+      source_url: @source_url,
+      homepage_url: @source_url,
+      docs: [main: "readme", extras: ["README.md"]]
     ]
   end
 
@@ -27,25 +37,46 @@ defmodule OapiCodemode.MixProject do
     [
       {:yaml_elixir, "~> 2.11"},
       {:jason, "~> 1.4"},
-      # Optional: only needed for OapiCodemode.Executor.ZapCode. Path dep until
-      # the hardened ex_zapcode ships to hex (needs zapcode branch
-      # harden/sandbox-untrusted-code pushed + rev-pinned first); then pin
-      # {:ex_zapcode, "~> 0.2", optional: true}.
-      {:ex_zapcode, path: "/Users/james/Desktop/lib/ex_zapcode", optional: true},
-      # Needed only while ex_zapcode is a path dep (forces a local NIF build);
-      # goes away with the hex pin above.
-      {:rustler, ">= 0.0.0", optional: true},
-      # Optional: only needed for OapiCodemode.Executor.SafeJS (QuickJS-NG, our
-      # hard fork of quicksand). Ref = v0.3.1 + its precompiled-NIF checksums
-      # commit (the tag itself predates the checksum file rustler_precompiled
-      # needs). Becomes {:ex_safejs, "~> 0.3.1", optional: true} once on hex.
+      {:req, "~> 0.5"},
+      {:telemetry, "~> 1.2"},
+      {:ex_doc, "~> 0.34", only: :dev, runtime: false},
+      {:plug, "~> 1.16", only: :test},
+      # Executor engines are dev/test-only so the suite exercises them but
+      # they stay out of the hex package (hex deps must be hex packages);
+      # consumers bring their own engine dep (see README). Becomes
+      # {:ex_safejs, "~> 0.3.1", optional: true} once ex_safejs is on hex.
+      # Ref = v0.3.1 + its precompiled-NIF checksums commit (the tag itself
+      # predates the checksum file rustler_precompiled needs).
       {:ex_safejs,
        github: "jtippett/ex_safejs",
        ref: "a4d2503e89951f22faa6bbbc043af02d4ab38cf0",
-       optional: true},
-      {:req, "~> 0.5"},
-      {:telemetry, "~> 1.2"},
-      {:plug, "~> 1.16", only: :test}
+       only: [:dev, :test]}
+    ] ++ local_engine_deps()
+  end
+
+  # Path dep until the hardened ex_zapcode ships to hex (needs zapcode branch
+  # harden/sandbox-untrusted-code pushed + rev-pinned first); then pin
+  # {:ex_zapcode, "~> 0.2", optional: true}. Guarded so checkouts without the
+  # local repo (CI, other machines) still compile — ZapCode tests skip there.
+  defp local_engine_deps do
+    zapcode = "/Users/james/Desktop/lib/ex_zapcode"
+
+    if File.dir?(zapcode) do
+      [
+        {:ex_zapcode, path: zapcode, only: [:dev, :test]},
+        # Forces the local NIF build for the path dep; goes away with the
+        # hex pin above.
+        {:rustler, ">= 0.0.0", only: [:dev, :test]}
+      ]
+    else
+      []
+    end
+  end
+
+  defp package do
+    [
+      licenses: ["MIT"],
+      links: %{"GitHub" => @source_url}
     ]
   end
 end

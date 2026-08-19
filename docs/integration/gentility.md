@@ -166,9 +166,17 @@ deadlines, billing) should pass
 `executor_opts: [wall_clock_ms: <hard ceiling>]`; the tools' default
 `:max_calls` (100 per run) already bounds call-count abuse either way.
 
-`Executor.Deno` remains the alternative if a loop needs regex in guest code
-or truly concurrent `Promise.all` (SafeJS runs requests serially); it needs
-the `deno` 2.x binary in the prod image.
+`Executor.Deno` remains the alternative if a loop needs truly concurrent
+`Promise.all` (SafeJS runs requests serially); it needs the `deno` 2.x
+binary in the prod image. (Regex is NOT a Deno edge — SafeJS runs it fine;
+the old no-regex note was quicksand-era, disproven live 2026-08-20.)
+
+Dev-server gotcha (hit by ele with Tidewave): Req's plug adapter hands the
+endpoint a conn whose `body_params`/`params` are already fetched — empty
+maps even on a bare GET. Harmless for `Plug.Parsers`, but any plug that
+asserts it runs pre-parsing will raise on every proxied loopback call. If
+a dev-only plug like Tidewave objects, wrap it host-side to tolerate (or
+reset) an already-fetched conn.
 
 ### 5. Verify, coexist, migrate
 

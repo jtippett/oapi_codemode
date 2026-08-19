@@ -67,6 +67,8 @@ defmodule OapiCodemode.Tools do
   they stay correct; only the descriptions go stale).
   """
 
+  require Logger
+
   alias OapiCodemode.{Proxy, Registry}
   alias OapiCodemode.Tools.{Descriptions, Result}
 
@@ -567,7 +569,15 @@ defmodule OapiCodemode.Tools do
   defp normalize_error({:wall_clock, ms}),
     do: {"run exceeded its wall-clock budget of #{ms} ms (host API-call time included)", []}
 
-  defp normalize_error({:raised, message}), do: {"sandbox error: #{sanitize(message)}", []}
+  # C1 sibling: an executor's own raise is infrastructure failure — its
+  # exception text can embed internals and is not model-actionable. Full
+  # detail to Logger, fixed string to the envelope. (Guest JS errors take
+  # the %{message: ...} clause below and stay verbatim — those the model
+  # caused and can fix.)
+  defp normalize_error({:raised, message}) do
+    Logger.error("oapi_codemode executor raised: #{message}")
+    {"sandbox executor error — details in host logs", []}
+  end
 
   defp normalize_error(%{message: message, logs: logs}) when is_list(logs),
     do: {"sandbox error: #{sanitize(message)}", logs}

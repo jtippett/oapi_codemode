@@ -112,19 +112,49 @@ defmodule OapiCodemode.Executor.SafeJSTest do
              )
   end
 
-  test "a raising callback aborts the run as a structured error" do
-    callback = fn _, _ -> raise "credential resolution failed" end
+  # C1 sibling: the real exception text is host-log-only — dogfooding
+  # caught a live infra exception landing verbatim in the model's envelope.
+  test "a raising callback aborts the run with a redacted error, detail in logs" do
+    callback = fn _, _ -> raise "secret-internal-detail-xyz" end
 
     code = "() => apis.a.request({ path: '/x' })"
 
-    assert {:error, %{message: msg}} =
-             SafeJS.run(
-               code,
-               %{globals: %{"apiNames" => ["a"]}, callbacks: %{request: callback}},
-               timeout: 10_000
-             )
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:error, %{message: msg}} =
+                 SafeJS.run(
+                   code,
+                   %{globals: %{"apiNames" => ["a"]}, callbacks: %{request: callback}},
+                   timeout: 10_000
+                 )
 
-    assert msg =~ "credential resolution failed"
+        refute msg =~ "secret-internal-detail-xyz"
+        assert msg =~ "host-side error"
+      end)
+
+    assert log =~ "secret-internal-detail-xyz"
+  end
+
+  test "regex works in guest code (the old no-regex note was quicksand-era)" do
+    code = ~S"""
+    () => {
+      const s = "rex-1, fido-2, rex-3";
+      return {
+        names: [...s.matchAll(/(?<name>\w+)-\d+/g)].map(m => m.groups.name),
+        replaced: s.replace(/rex/g, "REX"),
+        lookahead: /rex(?=-3)/.test(s)
+      };
+    }
+    """
+
+    assert {:ok, %{value: value}} =
+             SafeJS.run(code, %{globals: %{}, callbacks: %{}}, timeout: 10_000)
+
+    assert value == %{
+             "names" => ["rex", "fido", "rex"],
+             "replaced" => "REX-1, fido-2, REX-3",
+             "lookahead" => true
+           }
   end
 
   test "calling apis with no :request callback is an error, not a crash" do

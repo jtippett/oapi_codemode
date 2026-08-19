@@ -51,14 +51,21 @@ defmodule OapiCodemode.Executor.SafeJS do
   ## Divergences from `Executor.Deno`, inherent to the engine
 
     * **Serial `Promise.all`** (above): requests resolve one at a time.
-    * **Raising callbacks are opaque to the guest.** A callback that raises
-      surfaces to JS as a generic `"host function failed"` exception; if
-      uncaught, this run's `{:error, %{message: ..., logs: ...}}` carries
-      the real exception message (host-side only).
-    * **No regex.** (Shared with zapcode; steer codegen to string methods.)
+    * **Raising callbacks are opaque to the guest AND the caller.** A
+      callback that raises surfaces to JS as a generic
+      `"host function failed"` exception; if uncaught, this run's
+      `{:error, %{message: ..., logs: ...}}` carries a fixed redacted
+      message — the real exception text goes to `Logger` only (C1:
+      exception messages can embed paths, query fragments, credentials).
+
+  Regex works — global match, named groups, lookaheads (QuickJS-NG is a
+  complete engine). The old "no regex" note was a zapcode/quicksand-era
+  belief, disproven live 2026-08-20.
   """
 
   @behaviour OapiCodemode.Executor
+
+  require Logger
 
   @load_fn "__oapi_load_globals"
   @request_fn "__oapi_request"
@@ -192,6 +199,20 @@ defmodule OapiCodemode.Executor.SafeJS do
   # would break compilation for consumers without the optional dep.
   defp to_result({:error, %{__struct__: ExSafejs.Error, kind: :timeout}}, timeout),
     do: {:error, {:timeout, timeout}}
+
+  # C1 sibling: a raising callback's exception text can embed internals
+  # (paths, query fragments, credentials in a transport error) — full
+  # detail to Logger, fixed string to the caller. :host_error is a
+  # guest-forgeable hint, but forging it only gets the guest's own error
+  # REDACTED, so gating redaction (never exposure) on it is safe.
+  defp to_result(
+         {:error, %{__struct__: ExSafejs.Error, kind: :host_error, message: message}},
+         _timeout
+       ) do
+    Logger.error("oapi_codemode SafeJS host callback error: #{message}")
+
+    {:error, %{message: "a host-side error occurred while handling a call", logs: logs()}}
+  end
 
   defp to_result({:error, %{__struct__: ExSafejs.Error, message: message}}, _timeout) do
     {:error, %{message: first_line(message), logs: logs()}}

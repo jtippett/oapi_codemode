@@ -15,6 +15,58 @@ Format per entry:
 
 <!-- entries below -->
 
+## 2026-08-20 — ele (live dogfooding) — callback-raise exception text reaches the model-visible envelope
+
+**What happened:** Driving the tools against a real dev server, a host
+infra exception ("plug Tidewave is running too late...") landed verbatim
+in the model's envelope error. SafeJS's moduledoc claimed the real
+exception message was "host-side only", but the executor's
+`{:error, %{message: ...}}` flows through `Tools.normalize_error` into
+the envelope; `sanitize/1` bounds length, not content. Exception text can
+embed paths, query fragments, or credentials (the C1 lesson, unapplied to
+this path).
+**What the library should do differently:** Redact like the resolver
+path: full detail to Logger, fixed string to the model.
+**Severity:** annoying (security-relevant)
+**Resolved:** this commit, at both layers — `Executor.SafeJS` matches
+ex_safejs's `:host_error` kind and returns a fixed "host-side error"
+message (kind is guest-forgeable, but forging it only redacts the guest's
+own error, so gating redaction on it is safe); `Tools.normalize_error`
+redacts `{:raised, _}` (an executor's own raise) the same way for every
+executor. Guest JS errors stay verbatim — the model caused those and can
+fix them. Regression tests assert the detail reaches logs and not the
+envelope.
+
+## 2026-08-20 — ele (live dogfooding) — the "no regex" claim is false for SafeJS
+
+**What happened:** Guest code ran global match, replace, lookaheads, and
+named groups through the whole stack. The no-regex belief was
+zapcode/quicksand-era and survived into SafeJS's moduledoc, the gentility
+guide's "Deno if you need regex" line, and ele's pinned descriptions —
+steering codegen toward clumsy string methods for no reason. (Verified
+independently library-side before deleting the claim.)
+**What the library should do differently:** Delete the false teaching;
+pin the capability so it can't silently regress.
+**Severity:** cosmetic (but it was actively mis-steering codegen)
+**Resolved:** this commit — moduledoc and gentility guide corrected
+(zapcode's own no-regex note stays: that one is true, enforced at parse
+time); a SafeJS regression test pins matchAll/named groups/replace/
+lookahead. Deno's remaining edge is truly concurrent Promise.all only.
+
+## 2026-08-20 — ele (live dogfooding) — Req plug adapter hands hosts a pre-fetched conn
+
+**What happened:** Req's `:plug` adapter (used for loopback/dev and test
+stubs) delivers a conn with `body_params`/`params` already fetched —
+empty maps even on a bare GET. Any host plug asserting it runs
+pre-parsing raises on every proxied call; Tidewave did, on every dev
+loopback request.
+**What the library should do differently:** Nothing in code — this is
+Req adapter behavior, worked around host-side (ele: conn-reset wrapper
+plug). Documented in the gentility integration guide so the next Phoenix
+host with Tidewave in dev doesn't rediscover it.
+**Severity:** cosmetic (host-side)
+**Resolved:** this commit (docs note); host workaround in ele
+
 ## 2026-08-19 — ele (design request from James) — hand-written idempotency headers are too much to ask of the model
 
 **What happened:** With passthrough + response_headers in place the

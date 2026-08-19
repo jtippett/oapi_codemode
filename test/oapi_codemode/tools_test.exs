@@ -213,13 +213,20 @@ defmodule OapiCodemode.ToolsTest do
 
       Mock.set_response(fn _c, _e -> raise "boom inside the sandbox" end)
 
-      assert {:ok, result} = execute.handler.(%{"code" => "async () => 1"}, %{})
-      decoded = Jason.decode!(result)
-      assert decoded["calls"] == []
-      assert decoded["logs"] == []
-      assert decoded["error"] =~ "sandbox error"
-      assert decoded["error"] =~ "boom inside the sandbox"
-      refute Map.has_key?(decoded, "result")
+      # C1 sibling: an executor raise is infrastructure failure — the
+      # exception text goes to host logs, a fixed string to the envelope.
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, result} = execute.handler.(%{"code" => "async () => 1"}, %{})
+          decoded = Jason.decode!(result)
+          assert decoded["calls"] == []
+          assert decoded["logs"] == []
+          assert decoded["error"] =~ "sandbox executor error"
+          refute decoded["error"] =~ "boom inside the sandbox"
+          refute Map.has_key?(decoded, "result")
+        end)
+
+      assert log =~ "boom inside the sandbox"
 
       {:links, later} = Process.info(self(), :links)
       assert later == before

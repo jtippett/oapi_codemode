@@ -2,53 +2,46 @@ defmodule OapiCodemode.Executor.SafeJS do
   @moduledoc """
   In-process executor on [ex_safejs](https://github.com/jtippett/ex_safejs),
   the QuickJS-NG engine embedded as a Rustler NIF (our hard fork of
-  lpgauth/quicksand, carrying the rquickjs 0.12 fix for the BEAM-killing
-  SIGABRT on timeout-during-a-pending-promise-job — lpgauth/quicksand#2).
-  Like `Executor.ZapCode` it's a pure dependency with precompiled binaries —
-  no runtime binary in the image, no subprocess — but unlike zapcode it
-  enforces a genuine hard memory cap (QuickJS's own allocator is the sole
-  memory authority, so even typed-array/`ArrayBuffer` allocations are
-  bounded, the vector that escapes V8's heap limit) and runs a mature,
-  correct engine with O(1) container access (no O(n²) spec scans).
+  lpgauth/quicksand). Like `Executor.ZapCode` it's a pure dependency with
+  precompiled binaries — no runtime binary in the image, no subprocess — but
+  unlike zapcode it enforces a genuine hard memory cap (QuickJS's own
+  allocator is the sole memory authority, so even typed-array/`ArrayBuffer`
+  allocations are bounded, the vector that escapes V8's heap limit) and runs
+  a mature, correct engine with O(1) container access (no O(n²) spec scans).
 
-  ## Synchronous contract — this executor is different
+  ## Dialect: same async arrow as `Executor.Deno`
 
-  QuickJS-NG here does **not** pump the microtask queue before snapshotting
-  the eval result, so a Promise never resolves: an `async` arrow comes back
-  as an unresolved `{}`. Guest code must therefore be a **synchronous**
-  arrow, and `apis.<name>.request(...)` is a **blocking** call that returns
-  the response directly — no `await`, no `Promise.all`. The callback runs in
-  Elixir while the JS thread blocks, then the run resumes with its return
-  value. Callers that generate code for this executor must describe the
-  synchronous surface (this is why `run/3` is not a drop-in swap for
-  `Executor.Deno`, whose contract is an async arrow). An async-aware eval is
-  planned in ex_safejs (`eval_promise` + drain-check-settle); this contract
-  note is the thing to revisit when it ships.
+  Since ex_safejs 0.3.0 eval is async-aware, so guest code may be a sync or
+  an `async` arrow — `await`, `.then` chains, and `Promise.all` all work.
+  `apis.<name>.request(...)` blocks the JS thread while the Elixir callback
+  runs and returns the response as a plain value, which `await` passes
+  through unchanged; `Promise.all` over several requests therefore executes
+  them serially, not concurrently. Host-callback time does not count against
+  the sandbox timeout (it is a JS compute budget), and a promise that
+  nothing can ever settle is reported as a deadlock error immediately
+  instead of burning the timeout.
 
-  Injection differs too: ex_safejs has no globals API, so `env.globals` is
-  handed in through a host callback that returns the map (direct term→JS
-  conversion — faster than embedding JSON) and `Object.assign`ed onto
-  `globalThis` in a preamble. The `apis` object and a `console.log` capture
-  shim are built in the same preamble.
+  Injection differs from Deno: ex_safejs has no globals API, so
+  `env.globals` is handed in through a host callback that returns the map
+  (direct term→JS conversion — faster than embedding JSON) and
+  `Object.assign`ed onto `globalThis` in a preamble. The `apis` object and a
+  `console.log` capture shim are built in the same preamble.
 
   ## Isolation
 
-  `run/3` runs each eval in an unlinked, monitored throwaway process. This is
-  load-bearing, not hygiene: ex_safejs delivers `{:ex_safejs_callback, ...}`
-  and `{:ex_safejs_result, ...}` to the process servicing the eval, and a
-  *timed-out* eval can leave a straggler `{:ex_safejs_result, ...}` in that
-  mailbox after `eval/3` has already returned `{:error, "timeout"}`. Left in
-  the caller, that straggler would poison the next unrelated `receive` — fatal
-  for a host GenServer calling this synchronously (gentility's LoopServer). The
-  worker absorbs any straggler and dies with it; being unlinked and total, it
-  hands a trap_exit caller no `{:EXIT, _}`/`:DOWN`/stray message either.
+  ex_safejs guarantees a straggler-free mailbox: eval messages are tagged
+  per-eval and a timed-out eval's late result is absorbed inside `eval/3`,
+  so `run/3` executes directly in the calling process — safe for a
+  trap_exit GenServer caller (gentility's LoopServer). The quicksand-era
+  throwaway worker per eval is gone.
 
   ## Divergences from `Executor.Deno`, inherent to the engine
 
-    * **Synchronous** (above): no `await`, no `Promise.all`.
-    * **Callback errors abort the run.** A raising or `{:error, _}` callback
-      comes back as this run's `{:error, %{message: ..., logs: ...}}`, not a
-      catchable JS exception.
+    * **Serial `Promise.all`** (above): requests resolve one at a time.
+    * **Raising callbacks are opaque to the guest.** A callback that raises
+      surfaces to JS as a generic `"host function failed"` exception; if
+      uncaught, this run's `{:error, %{message: ..., logs: ...}}` carries
+      the real exception message (host-side only).
     * **No regex.** (Shared with zapcode; steer codegen to string methods.)
   """
 
@@ -61,35 +54,6 @@ defmodule OapiCodemode.Executor.SafeJS do
 
   @impl true
   def run(code, env, opts) do
-    timeout = Keyword.get(opts, :timeout, 30_000)
-    owner = self()
-    ref = make_ref()
-
-    # Unlinked worker: a linked task would send a trap_exit caller
-    # {:EXIT, _, :normal}, the same unmatched-straggler hazard the isolation
-    # is meant to remove. do_run/4 is total, so the worker's normal return —
-    # never an exit signal — carries the result back.
-    {worker, mon} =
-      spawn_monitor(fn -> send(owner, {ref, safe_run(code, env, opts)}) end)
-
-    receive do
-      {^ref, result} ->
-        Process.demonitor(mon, [:flush])
-        result
-
-      {:DOWN, ^mon, :process, ^worker, reason} ->
-        {:error, {:worker_down, reason}}
-    after
-      # A little past the engine's own deadline; the worker should return its
-      # own {:timeout, _} first. This only fires if the worker itself wedges.
-      timeout + 5_000 ->
-        Process.exit(worker, :kill)
-        Process.demonitor(mon, [:flush])
-        {:error, {:timeout, timeout}}
-    end
-  end
-
-  defp safe_run(code, env, opts) do
     do_run(code, env, opts)
   rescue
     e -> {:error, {:raised, Exception.message(e)}}
@@ -104,13 +68,12 @@ defmodule OapiCodemode.Executor.SafeJS do
       |> maybe_put(:max_stack_size, Keyword.get(opts, :max_stack_size))
 
     Process.put(@logs_key, [])
-    Process.put({__MODULE__, :timeout}, timeout)
 
     case ExSafejs.start(start_opts) do
       {:ok, rt} ->
         try do
           full = preamble(env.globals) <> "\nconst __oapi_main = " <> code <> ";\n__oapi_main();"
-          rt |> ExSafejs.eval(full, callbacks(env)) |> to_result()
+          rt |> ExSafejs.eval(full, callbacks(env)) |> to_result(timeout)
         after
           ExSafejs.stop(rt)
         end
@@ -171,26 +134,18 @@ defmodule OapiCodemode.Executor.SafeJS do
     "{ " <> entries <> " }"
   end
 
-  defp to_result({:ok, value}), do: {:ok, %{value: value, logs: logs()}}
+  defp to_result({:ok, value}, _timeout), do: {:ok, %{value: value, logs: logs()}}
 
-  defp to_result({:error, message}) when is_binary(message) do
-    cond do
-      timeout?(message) -> {:error, {:timeout, timeout_ms(message)}}
-      true -> {:error, %{message: first_line(message), logs: logs()}}
-    end
+  defp to_result({:error, %ExSafejs.Error{kind: :timeout}}, timeout),
+    do: {:error, {:timeout, timeout}}
+
+  defp to_result({:error, %ExSafejs.Error{message: message}}, _timeout) do
+    {:error, %{message: first_line(message), logs: logs()}}
   end
 
   # ex_safejs returns just the value; console output was captured host-side as
   # we went, oldest first once reversed.
   defp logs, do: @logs_key |> Process.get([]) |> Enum.reverse()
-
-  defp timeout?("timeout" <> _), do: true
-  defp timeout?(_), do: false
-
-  # The engine reports "timeout" without the configured ms; carry back what we
-  # asked for so the tool layer can render {:timeout, ms} uniformly. The value
-  # is stashed by do_run via the process dictionary of this worker.
-  defp timeout_ms(_message), do: Process.get({__MODULE__, :timeout}, 0)
 
   defp first_line(message), do: message |> String.split("\n") |> hd() |> String.slice(0, 500)
 

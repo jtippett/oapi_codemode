@@ -3,9 +3,10 @@ defmodule OapiCodemode.Executor.SafeJSTest do
   @moduletag :safe_js
   alias OapiCodemode.Executor.SafeJS
 
-  # NOTE the SYNCHRONOUS contract: ex_safejs (QuickJS-NG) does not pump the
-  # microtask queue, so promises never resolve. Guest code is a synchronous
-  # arrow — `apis.x.request(...)` blocks and returns directly, no `await`.
+  # Dialect: same async arrow as Deno since ex_safejs 0.3.0 — sync arrows
+  # still work, `await`/`Promise.all` work too. `apis.x.request(...)` blocks
+  # the JS thread while the Elixir callback runs; `await` passes the plain
+  # value through, and `Promise.all` over requests executes them serially.
 
   test "evaluates code and returns the value" do
     assert {:ok, %{value: 3, logs: []}} =
@@ -172,8 +173,8 @@ defmodule OapiCodemode.Executor.SafeJSTest do
 
     refute_receive {:EXIT, _, _}, 200
     refute_receive {:DOWN, _, _, _, _}, 0
-    refute_receive {:ex_safejs_result, _}, 0
-    refute_receive {:ex_safejs_callback, _, _, _}, 0
+    refute_receive {:ex_safejs_result, _, _}, 0
+    refute_receive {:ex_safejs_callback, _, _, _, _}, 0
   end
 
   # Regression for the bug that forced the ex_safejs fork: under quicksand
@@ -190,5 +191,93 @@ defmodule OapiCodemode.Executor.SafeJSTest do
     # The node survived and the executor still works.
     assert {:ok, %{value: 2}} =
              SafeJS.run("() => 1 + 1", %{globals: %{}, callbacks: %{}}, timeout: 10_000)
+  end
+
+  # ── async dialect (the 7-test spec reverted on 2026-08-19, now live) ──────
+
+  test "async arrow with await" do
+    code = "async () => { const a = 1; return await Promise.resolve(a + 1); }"
+
+    assert {:ok, %{value: 2}} =
+             SafeJS.run(code, %{globals: %{}, callbacks: %{}}, timeout: 10_000)
+  end
+
+  test "console output after an await is still captured" do
+    code = """
+    async () => {
+      console.log('before');
+      await Promise.resolve();
+      console.log('after');
+      return null;
+    }
+    """
+
+    assert {:ok, %{value: nil, logs: ["before", "after"]}} =
+             SafeJS.run(code, %{globals: %{}, callbacks: %{}}, timeout: 10_000)
+  end
+
+  test "await apis.x.request" do
+    callback = fn "petstore", %{"path" => "/pets"} ->
+      %{"status" => 200, "body" => %{"n" => 7}}
+    end
+
+    code =
+      "async () => { const r = await apis.petstore.request({ path: '/pets' }); return r.body.n; }"
+
+    assert {:ok, %{value: 7}} =
+             SafeJS.run(
+               code,
+               %{globals: %{"apiNames" => ["petstore"]}, callbacks: %{request: callback}},
+               timeout: 10_000
+             )
+  end
+
+  test "Promise.all over requests completes (serially)" do
+    callback = fn "a", %{"path" => path} -> %{"path" => path} end
+
+    code = """
+    async () => {
+      const [x, y] = await Promise.all([
+        apis.a.request({ path: '/one' }),
+        apis.a.request({ path: '/two' })
+      ]);
+      return [x.path, y.path];
+    }
+    """
+
+    assert {:ok, %{value: ["/one", "/two"]}} =
+             SafeJS.run(
+               code,
+               %{globals: %{"apiNames" => ["a"]}, callbacks: %{request: callback}},
+               timeout: 10_000
+             )
+  end
+
+  test "async throw comes back as a structured error" do
+    code = "async () => { throw new Error('async boom'); }"
+
+    assert {:error, %{message: msg, logs: []}} =
+             SafeJS.run(code, %{globals: %{}, callbacks: %{}}, timeout: 10_000)
+
+    assert msg =~ "async boom"
+  end
+
+  test "a promise nothing can settle is an immediate error, not a burned timeout" do
+    started = System.monotonic_time(:millisecond)
+
+    assert {:error, %{message: msg}} =
+             SafeJS.run("() => new Promise(() => {})", %{globals: %{}, callbacks: %{}},
+               timeout: 10_000
+             )
+
+    assert System.monotonic_time(:millisecond) - started < 1_000
+    assert msg =~ "pending"
+  end
+
+  test "infinite loop after an await still times out" do
+    code = "async () => { await Promise.resolve(); while (true) {} }"
+
+    assert {:error, {:timeout, 300}} =
+             SafeJS.run(code, %{globals: %{}, callbacks: %{}}, timeout: 300)
   end
 end

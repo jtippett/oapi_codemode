@@ -213,18 +213,18 @@ The sandbox that runs the LLM-written JS sits behind the
   [lpgauth/quicksand#2](https://github.com/lpgauth/quicksand/issues/2)).
   The only executor with a genuine hard memory cap: typed-array/`ArrayBuffer`
   bombs that escape V8's heap limit under Deno come back as a structured
-  out-of-memory error here. **Synchronous contract**: guest code must be a
-  sync arrow and `apis.x.request(...)` blocks — no `async`/`await`, no
-  `Promise.all` — so tool descriptions must teach the sync dialect (see
-  the moduledoc; async-aware eval is on the fork's roadmap).
+  out-of-memory error here. Speaks the same async-arrow dialect as Deno
+  (`await`, `Promise.all` — though requests resolve serially, and
+  `apis.x.request(...)` also works as a plain blocking call). Host-callback
+  time doesn't count against the sandbox timeout, and a promise nothing can
+  settle is reported as a deadlock immediately.
 - **`OapiCodemode.Executor.ZapCode`** — execute works end-to-end behind the
   optional `ex_zapcode` dep, but search over real specs is engine-blocked
   (container copy semantics make scans O(n²)), and it runs in-BEAM, so it's
   for trusted/agent-authored code only.
 
 The `Executor` behaviour contract is stable; swapping executors doesn't
-change how you call `OapiCodemode.tools/1` — but note the SafeJS sync
-dialect above when generating code.
+change how you call `OapiCodemode.tools/1`.
 
 ## Design rationale
 

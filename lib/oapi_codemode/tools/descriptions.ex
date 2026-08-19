@@ -87,7 +87,7 @@ defmodule OapiCodemode.Tools.Descriptions do
       query?: Record<string, unknown>;
       body?: unknown;
       contentType?: string;                // default application/json when body present
-      rawBody?: boolean;                   // send body as-is, no JSON.stringify
+      rawBody?: boolean;                   // send body as-is, no JSON.stringify#{headers_field(entries)}
     }
 
     interface Response { status: number; headers: Record<string, string>; body: unknown; }
@@ -100,7 +100,7 @@ defmodule OapiCodemode.Tools.Descriptions do
 
     Your code must be an async arrow function that returns the result.
     Promise.all over several requests is fine (they may execute serially).
-
+    #{headers_paragraph(entries)}
     Example:
     async () => {
       const r = await apis.petstore.request({ method: "GET", path: "/pets", query: { limit: 10 } });
@@ -125,6 +125,39 @@ defmodule OapiCodemode.Tools.Descriptions do
   end
 
   defp policy_paragraph(_read_only), do: ""
+
+  # Only declared when some API actually allows header passthrough —
+  # advertising a `headers` option the proxy would reject as [policy] on
+  # every API would teach the model a lie.
+  defp headers_field(entries) do
+    if passthrough_names(entries) == [] do
+      ""
+    else
+      "\n  headers?: Record<string, string>;    // only allowlisted names, see below"
+    end
+  end
+
+  defp headers_paragraph(entries) do
+    case passthrough_names(entries) do
+      [] ->
+        ""
+
+      names ->
+        "\nPer-call headers: only these header names are allowed — " <>
+          Enum.join(names, ", ") <>
+          ". Any other name is rejected before the request is sent.\n"
+    end
+  end
+
+  # Downcased for display — the proxy matches case-insensitively and
+  # forwards downcased, so the description teaches the canonical spelling.
+  defp passthrough_names(entries) do
+    entries
+    |> Enum.flat_map(fn {_, entry} -> entry.config.passthrough_headers end)
+    |> Enum.map(&String.downcase/1)
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
 
   defp api_line({name, entry}) do
     title = entry.artifact.title || name

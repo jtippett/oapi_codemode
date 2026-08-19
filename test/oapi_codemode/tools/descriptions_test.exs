@@ -39,6 +39,30 @@ defmodule OapiCodemode.Tools.DescriptionsTest do
     assert desc =~ "status"
   end
 
+  # The description IS the documentation: a host that allowlists
+  # passthrough headers needs the model told the option exists and exactly
+  # which names are allowed; a host that doesn't must not have a `headers`
+  # option advertised that the proxy would reject on every call.
+  test "execute description declares headers only when passthrough is configured", %{
+    reg: reg,
+    art: art
+  } do
+    without = Descriptions.execute(Registry.list(reg))
+    refute without =~ "headers?:"
+    refute without =~ "Per-call headers"
+
+    :ok =
+      Registry.register(reg, "billing", art, %ApiConfig{
+        passthrough_headers: ["Idempotency-Key"]
+      })
+
+    with_headers = Descriptions.execute(Registry.list(reg))
+    assert with_headers =~ "headers?: Record<string, string>"
+
+    assert with_headers =~
+             "Per-call headers: only these header names are allowed — idempotency-key"
+  end
+
   # I2: with per-instance tool naming (e.g. stripe_api_search/execute
   # trios), the description must name the ACTUAL paired search tool, not a
   # generic "the search tool" — otherwise the model can pair the wrong

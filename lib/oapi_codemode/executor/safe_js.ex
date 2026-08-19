@@ -1,53 +1,42 @@
-defmodule OapiCodemode.Executor.Quicksand do
+defmodule OapiCodemode.Executor.SafeJS do
   @moduledoc """
-  In-process executor on [quicksand](https://hex.pm/packages/quicksand), the
-  QuickJS-NG engine embedded as a Rustler NIF. Like `Executor.ZapCode` it's a
-  pure hex dependency with precompiled binaries — no runtime binary in the
-  image, no subprocess — but unlike zapcode it enforces a genuine hard memory
-  cap (QuickJS's own allocator is the sole memory authority, so even
-  typed-array/`ArrayBuffer` allocations are bounded, the vector that escapes
-  V8's heap limit) and runs a mature, correct engine with O(1) container
-  access (no O(n²) spec scans).
+  In-process executor on [ex_safejs](https://github.com/jtippett/ex_safejs),
+  the QuickJS-NG engine embedded as a Rustler NIF (our hard fork of
+  lpgauth/quicksand, carrying the rquickjs 0.12 fix for the BEAM-killing
+  SIGABRT on timeout-during-a-pending-promise-job — lpgauth/quicksand#2).
+  Like `Executor.ZapCode` it's a pure dependency with precompiled binaries —
+  no runtime binary in the image, no subprocess — but unlike zapcode it
+  enforces a genuine hard memory cap (QuickJS's own allocator is the sole
+  memory authority, so even typed-array/`ArrayBuffer` allocations are
+  bounded, the vector that escapes V8's heap limit) and runs a mature,
+  correct engine with O(1) container access (no O(n²) spec scans).
 
   ## Synchronous contract — this executor is different
 
-  QuickJS-NG here does **not** pump the microtask queue, so a Promise never
-  resolves: an `async` arrow comes back as an unresolved `{}`. Guest code must
-  therefore be a **synchronous** arrow, and `apis.<name>.request(...)` is a
-  **blocking** call that returns the response directly — no `await`, no
-  `Promise.all`. The callback runs in Elixir while the JS thread blocks, then
-  the run resumes with its return value. Callers that generate code for this
-  executor must describe the synchronous surface (this is why `run/3` is not a
-  drop-in swap for `Executor.Deno`, whose contract is an async arrow).
+  QuickJS-NG here does **not** pump the microtask queue before snapshotting
+  the eval result, so a Promise never resolves: an `async` arrow comes back
+  as an unresolved `{}`. Guest code must therefore be a **synchronous**
+  arrow, and `apis.<name>.request(...)` is a **blocking** call that returns
+  the response directly — no `await`, no `Promise.all`. The callback runs in
+  Elixir while the JS thread blocks, then the run resumes with its return
+  value. Callers that generate code for this executor must describe the
+  synchronous surface (this is why `run/3` is not a drop-in swap for
+  `Executor.Deno`, whose contract is an async arrow). An async-aware eval is
+  planned in ex_safejs (`eval_promise` + drain-check-settle); this contract
+  note is the thing to revisit when it ships.
 
-  Injection differs too: quicksand has no globals API, so `env.globals` is
+  Injection differs too: ex_safejs has no globals API, so `env.globals` is
   handed in through a host callback that returns the map (direct term→JS
   conversion — faster than embedding JSON) and `Object.assign`ed onto
   `globalThis` in a preamble. The `apis` object and a `console.log` capture
   shim are built in the same preamble.
 
-  ## Known upstream issue — timeout inside a pending promise job aborts the VM
-
-  Until quicksand ships rquickjs 0.12+
-  ([lpgauth/quicksand#2](https://github.com/lpgauth/quicksand/issues/2)),
-  guest code that schedules a promise job which is still *running* when the
-  timeout interrupt fires — e.g.
-  `() => { Promise.resolve().then(() => { while (true) {} }); return 1 }` —
-  aborts the whole node (SIGABRT from a `gc_decref_child` assertion when the
-  runtime is freed; rquickjs bug #663, fixed upstream in 0.12.0). The
-  unlinked worker below does **not** contain it: a native abort kills the
-  BEAM, not a process. Timeouts on the main eval, queued-but-unrun jobs, and
-  OOM inside jobs all fail cleanly. Consequence: do not point this executor
-  at adversarial input until the bump lands; there is deliberately no test
-  for this case (it would abort the suite) — the async test spec reverted on
-  2026-08-19 is the re-enable checklist.
-
   ## Isolation
 
   `run/3` runs each eval in an unlinked, monitored throwaway process. This is
-  load-bearing, not hygiene: quicksand delivers `{:quicksand_callback, ...}`
-  and `{:quicksand_result, ...}` to the process servicing the eval, and a
-  *timed-out* eval can leave a straggler `{:quicksand_result, ...}` in that
+  load-bearing, not hygiene: ex_safejs delivers `{:ex_safejs_callback, ...}`
+  and `{:ex_safejs_result, ...}` to the process servicing the eval, and a
+  *timed-out* eval can leave a straggler `{:ex_safejs_result, ...}` in that
   mailbox after `eval/3` has already returned `{:error, "timeout"}`. Left in
   the caller, that straggler would poison the next unrelated `receive` — fatal
   for a host GenServer calling this synchronously (gentility's LoopServer). The
@@ -117,13 +106,13 @@ defmodule OapiCodemode.Executor.Quicksand do
     Process.put(@logs_key, [])
     Process.put({__MODULE__, :timeout}, timeout)
 
-    case Quicksand.start(start_opts) do
+    case ExSafejs.start(start_opts) do
       {:ok, rt} ->
         try do
           full = preamble(env.globals) <> "\nconst __oapi_main = " <> code <> ";\n__oapi_main();"
-          rt |> Quicksand.eval(full, callbacks(env)) |> to_result()
+          rt |> ExSafejs.eval(full, callbacks(env)) |> to_result()
         after
-          Quicksand.stop(rt)
+          ExSafejs.stop(rt)
         end
 
       {:error, reason} ->
@@ -191,7 +180,7 @@ defmodule OapiCodemode.Executor.Quicksand do
     end
   end
 
-  # quicksand returns just the value; console output was captured host-side as
+  # ex_safejs returns just the value; console output was captured host-side as
   # we went, oldest first once reversed.
   defp logs, do: @logs_key |> Process.get([]) |> Enum.reverse()
 

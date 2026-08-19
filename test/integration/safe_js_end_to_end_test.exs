@@ -1,16 +1,16 @@
-defmodule OapiCodemode.QuicksandEndToEndTest do
+defmodule OapiCodemode.SafeJSEndToEndTest do
   @moduledoc """
-  Full stack on the QuickJS-NG NIF executor: `OapiCodemode.Executor.Quicksand`
+  Full stack on the QuickJS-NG NIF executor: `OapiCodemode.Executor.SafeJS`
   driving `search_apis` and `execute_api_code`, upstream HTTP stubbed via a
   bare plug closure (see the Req.Test process-scoping notes in
   `end_to_end_test.exs`).
 
   SYNCHRONOUS contract: guest code is a plain arrow and `apis.x.request(...)`
-  is a blocking call — no `await`, no `Promise.all` (see `Executor.Quicksand`).
+  is a blocking call — no `await`, no `Promise.all` (see `Executor.SafeJS`).
   """
 
   use ExUnit.Case, async: true
-  @moduletag :quicksand
+  @moduletag :safe_js
 
   alias OapiCodemode.{Registry, Fixtures}
 
@@ -27,7 +27,7 @@ defmodule OapiCodemode.QuicksandEndToEndTest do
 
     opts = [
       registry: reg,
-      executor: OapiCodemode.Executor.Quicksand,
+      executor: OapiCodemode.Executor.SafeJS,
       resolver: Resolver,
       policy: :read_only
     ]
@@ -139,7 +139,7 @@ defmodule OapiCodemode.QuicksandEndToEndTest do
 
     opts = [
       registry: reg,
-      executor: OapiCodemode.Executor.Quicksand,
+      executor: OapiCodemode.Executor.SafeJS,
       resolver: Resolver,
       policy: :read_only
     ]
@@ -167,7 +167,7 @@ defmodule OapiCodemode.QuicksandEndToEndTest do
       :timer.tc(fn -> search.handler.(%{"code" => code}, %{}) end)
 
     elapsed_ms = elapsed_us / 1000
-    IO.puts("x_api fixture search wall time (quicksand): #{Float.round(elapsed_ms, 1)} ms")
+    IO.puts("x_api fixture search wall time (ex_safejs): #{Float.round(elapsed_ms, 1)} ms")
     assert elapsed_ms < 10_000
 
     decoded = Jason.decode!(found)

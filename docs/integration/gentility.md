@@ -157,9 +157,8 @@ precompiled binaries) is the recommended executor for untrusted
 model-written code: nothing to add to the prod image, a genuine hard
 memory cap (typed-array bombs that escape V8's heap limit under Deno come
 back as structured out-of-memory errors), and the same async-arrow dialect
-as Deno, so no prompt changes. It's an optional dep — add ex_safejs to
-gentility's mix.exs, copying the pinned `ref:` from this repo's mix.exs
-(an unpinned `github:` dep would float with master).
+as Deno, so no prompt changes. It's an optional dep — add
+`{:ex_safejs, "~> 0.3.1"}` to gentility's mix.exs.
 
 `Executor.Deno` remains the alternative if a loop needs regex in guest code
 or truly concurrent `Promise.all` (SafeJS runs requests serially); it needs

@@ -20,6 +20,22 @@ Because the request never actually executes inside the sandbox, the
 sandbox never holds an API key, bearer token, or any other secret —
 credentials are attached host-side, after the JS has finished running.
 
+## Installation
+
+```elixir
+def deps do
+  [
+    {:oapi_codemode, "~> 0.1.0"},
+    # plus the engine for your chosen executor — for the recommended
+    # Executor.SafeJS (QuickJS-NG NIF, precompiled binaries):
+    {:ex_safejs, "~> 0.3.1"}
+  ]
+end
+```
+
+`Executor.Deno` needs no extra dep, just a `deno` 2.x binary on `PATH`.
+See [Executor status](#executor-status) for the trade-offs.
+
 ## Why spec-as-data search
 
 Specs can be huge, and dumping every operation into the system prompt
@@ -233,15 +249,3 @@ See
 for the full design writeup — why search and execute are separate tools,
 why validation and credentialing live in Elixir rather than the sandbox,
 and how the registry, ingest pipeline, and proxy fit together.
-
-## Installation
-
-Not yet published to Hex. Pull it in as a path or git dependency:
-
-```elixir
-def deps do
-  [
-    {:oapi_codemode, github: "your-org/oapi_codemode"}
-  ]
-end
-```

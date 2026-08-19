@@ -41,16 +41,11 @@ defmodule OapiCodemode.MixProject do
       {:telemetry, "~> 1.2"},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:plug, "~> 1.16", only: :test},
-      # Executor engines are dev/test-only so the suite exercises them but
-      # they stay out of the hex package (hex deps must be hex packages);
-      # consumers bring their own engine dep (see README). Becomes
-      # {:ex_safejs, "~> 0.3.1", optional: true} once ex_safejs is on hex.
-      # Ref = v0.3.1 + its precompiled-NIF checksums commit (the tag itself
-      # predates the checksum file rustler_precompiled needs).
-      {:ex_safejs,
-       github: "jtippett/ex_safejs",
-       ref: "a4d2503e89951f22faa6bbbc043af02d4ab38cf0",
-       only: [:dev, :test]}
+      # Optional: only needed for OapiCodemode.Executor.SafeJS (QuickJS-NG,
+      # our hard fork of quicksand). Optional deps aren't pulled in by
+      # consumers automatically — add ex_safejs alongside this library to
+      # use SafeJS.
+      {:ex_safejs, "~> 0.3.1", optional: true}
     ] ++ local_engine_deps()
   end
 

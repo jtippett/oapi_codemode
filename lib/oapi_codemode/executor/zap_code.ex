@@ -53,6 +53,10 @@ defmodule OapiCodemode.Executor.ZapCode do
 
   @behaviour OapiCodemode.Executor
 
+  # ex_zapcode is an optional dep: consumers who never select this executor
+  # compile without it, and these remote calls must not warn there.
+  @compile {:no_warn_undefined, ExZapcode}
+
   @impl true
   def run(code, env, opts) do
     timeout = Keyword.get(opts, :timeout, 30_000)

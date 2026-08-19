@@ -15,6 +15,26 @@ Format per entry:
 
 <!-- entries below -->
 
+## 2026-08-19 — ele — response-header whitelist hides the idempotent-replay marker
+
+**What happened:** Adopting header passthrough for idempotency keys in
+ele: scripts could now SEND an `idempotency-key`, and ele's
+`Idempotency-Key` plug replayed repeats correctly — but the sandbox
+could never see that a replay happened. The proxy whitelists response
+headers (`content-type`, `x-request-id`, `retry-after`, `x-ratelimit-*`)
+and ele's `idempotent-replayed: true` marker was silently stripped, so
+the model couldn't distinguish "this executed" from "this was deduped" —
+exactly the signal that makes retry-with-the-same-key trustworthy. Ele's
+first e2e asserted on the marker and got `nil` while the replay itself
+worked.
+**What the library should do differently:** Let the host extend the
+response whitelist per API. Resolved in 0.2.1 —
+`ApiConfig.response_headers` (case-insensitive in, downcased out); ele
+registers `response_headers: ["idempotent-replayed"]` beside
+`passthrough_headers: ["idempotency-key"]` and the e2e sees the marker.
+**Severity:** annoying
+**Resolved:** 0.2.1
+
 ## 2026-08-19 — ele — a killed run's envelope omits mutations that already landed
 
 **What happened:** Follow-on from the wall-clock entry below, caught by

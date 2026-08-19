@@ -115,10 +115,10 @@ single-spec registry from step 1, emit its own tool trio, naming each with
 the integration's slug via `:search_tool_name` / `:execute_tool_name`:
 
 ```elixir
-OapiCodemode.tools(registry: reg, executor: OapiCodemode.Executor.Deno,
+OapiCodemode.tools(registry: reg, executor: OapiCodemode.Executor.SafeJS,
   resolver: Gentility.Integrations.OapiCredentialResolver, policy: :read_only,
   search_tool_name: "#{slug}_api_search", execute_tool_name: "#{slug}_api_execute")
-++ OapiCodemode.tools(registry: reg, executor: OapiCodemode.Executor.Deno,
+++ OapiCodemode.tools(registry: reg, executor: OapiCodemode.Executor.SafeJS,
   resolver: Gentility.Integrations.OapiCredentialResolver, policy: :all,
   execute_tool_name: "#{slug}_api_mutations", include_search: false)
 ```
@@ -150,15 +150,24 @@ three new tools — `x_api_search`, `x_api_execute`, `x_api_mutations` — with
 registry-derived descriptions, and a loop with no bound openapi integrations
 sees none.
 
-### 4. Deployment: Deno
+### 4. Deployment: nothing
 
-Same as ele's step 4: `deno` 2.x binary in the prod image, no other config.
-Check gentility's image build for where CLI binaries get added.
+`Executor.SafeJS` (ex_safejs ≥ 0.3.0, QuickJS-NG as a Rustler NIF with
+precompiled binaries) is the recommended executor for untrusted
+model-written code: nothing to add to the prod image, a genuine hard
+memory cap (typed-array bombs that escape V8's heap limit under Deno come
+back as structured out-of-memory errors), and the same async-arrow dialect
+as Deno, so no prompt changes. It's an optional dep — add
+`{:ex_safejs, github: "jtippett/ex_safejs"}` to gentility's mix.exs.
+
+`Executor.Deno` remains the alternative if a loop needs regex in guest code
+or truly concurrent `Promise.all` (SafeJS runs requests serially); it needs
+the `deno` 2.x binary in the prod image.
 
 ### 5. Verify, coexist, migrate
 
-E2e in gentility's suite: Mock-executor test for the glue, one `@tag :deno`
-test through the real sandbox (closure-plug `req_options` for stubbed
+E2e in gentility's suite: Mock-executor test for the glue, one test
+through the real SafeJS sandbox (closure-plug `req_options` for stubbed
 upstreams — named `Req.Test` stubs are process-scoped and won't reach the
 executor's callback Tasks). Then run both paths in staging: the old
 per-operation adapter tools and the new per-integration trios coexist safely

@@ -99,7 +99,7 @@ defmodule OapiCodemode.Tools.Descriptions do
     #{context_globals(entries)}
 
     Your code must be an async arrow function that returns the result.
-    Concurrent requests via Promise.all are fine.
+    Promise.all over several requests is fine (they may execute serially).
 
     Example:
     async () => {

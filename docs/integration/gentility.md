@@ -160,6 +160,12 @@ back as structured out-of-memory errors), and the same async-arrow dialect
 as Deno, so no prompt changes. It's an optional dep — add
 `{:ex_safejs, "~> 0.3.1"}` to gentility's mix.exs.
 
+One contract to know: SafeJS's `:timeout` is a JS *compute* budget that
+excludes host-callback time. A loop that meters runs (LoopServer
+deadlines, billing) should pass
+`executor_opts: [wall_clock_ms: <hard ceiling>]`; the tools' default
+`:max_calls` (100 per run) already bounds call-count abuse either way.
+
 `Executor.Deno` remains the alternative if a loop needs regex in guest code
 or truly concurrent `Promise.all` (SafeJS runs requests serially); it needs
 the `deno` 2.x binary in the prod image.

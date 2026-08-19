@@ -280,4 +280,74 @@ defmodule OapiCodemode.Executor.SafeJSTest do
     assert {:error, {:timeout, 300}} =
              SafeJS.run(code, %{globals: %{}, callbacks: %{}}, timeout: 300)
   end
+
+  # ── wall clock (ele P1) ────────────────────────────────────────────────────
+  # The engine :timeout is a JS compute budget that excludes host-callback
+  # time, so a guest looping over cheap request() calls is unbounded in wall
+  # time unless the host opts into :wall_clock_ms.
+
+  test ":wall_clock_ms ends a run that loops over cheap host callbacks" do
+    code = "() => { while (true) { apis.a.request({}); } }"
+
+    request = fn _name, _opts ->
+      Process.sleep(30)
+      %{"ok" => true}
+    end
+
+    started = System.monotonic_time(:millisecond)
+
+    assert {:error, {:wall_clock, 250}} =
+             SafeJS.run(
+               code,
+               %{globals: %{"apiNames" => ["a"]}, callbacks: %{request: request}},
+               timeout: 10_000,
+               wall_clock_ms: 250
+             )
+
+    assert System.monotonic_time(:millisecond) - started < 2_000
+  end
+
+  test "a run under the wall clock is unaffected, logs included" do
+    assert {:ok, %{value: 3, logs: ["hi"]}} =
+             SafeJS.run(
+               ~s[() => { console.log("hi"); return 3; }],
+               %{globals: %{}, callbacks: %{}},
+               timeout: 10_000,
+               wall_clock_ms: 5_000
+             )
+  end
+
+  test "the engine compute timeout still applies inside a wall-clocked run" do
+    assert {:error, {:timeout, 300}} =
+             SafeJS.run("() => { while (true) {} }", %{globals: %{}, callbacks: %{}},
+               timeout: 300,
+               wall_clock_ms: 10_000
+             )
+  end
+
+  test "a wall-clock kill leaks nothing into a trap_exit caller" do
+    Process.flag(:trap_exit, true)
+
+    request = fn _name, _opts ->
+      Process.sleep(50)
+      %{}
+    end
+
+    assert {:error, {:wall_clock, 200}} =
+             SafeJS.run(
+               "() => { while (true) { apis.a.request({}); } }",
+               %{globals: %{"apiNames" => ["a"]}, callbacks: %{request: request}},
+               timeout: 10_000,
+               wall_clock_ms: 200
+             )
+
+    # A subsequent normal run must be clean, not poisoned by the kill.
+    assert {:ok, %{value: 42}} =
+             SafeJS.run("() => 42", %{globals: %{}, callbacks: %{}}, timeout: 10_000)
+
+    refute_receive {:EXIT, _, _}, 200
+    refute_receive {:DOWN, _, _, _, _}, 0
+    refute_receive {:ex_safejs_result, _, _}, 0
+    refute_receive {:ex_safejs_callback, _, _, _, _}, 0
+  end
 end

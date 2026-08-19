@@ -9,6 +9,11 @@ defmodule OapiCodemode.ApiConfig do
             validate: :strict,
             # max upstream response body bytes surfaced to the sandbox
             max_response_bytes: 200_000,
+            # header names sandbox code may set via the request options'
+            # "headers" map (matched case-insensitively, forwarded downcased) —
+            # e.g. ["idempotency-key"]. Anything not listed is a policy error,
+            # and credential/library headers are reserved even when listed.
+            passthrough_headers: [],
             # per-API Req options (e.g. egress proxy connect_options), appended before
             # call-time host_ctx.req_options: for scalar options (e.g. :connect_options,
             # :redirect) call-time wins on conflict; :headers and :params are MERGED

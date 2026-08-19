@@ -231,9 +231,13 @@ The sandbox that runs the LLM-written JS sits behind the
   bombs that escape V8's heap limit under Deno come back as a structured
   out-of-memory error here. Speaks the same async-arrow dialect as Deno
   (`await`, `Promise.all` — though requests resolve serially, and
-  `apis.x.request(...)` also works as a plain blocking call). Host-callback
-  time doesn't count against the sandbox timeout, and a promise nothing can
-  settle is reported as a deadlock immediately.
+  `apis.x.request(...)` also works as a plain blocking call). Its timeout
+  is a JS *compute* budget — host-callback time doesn't count, so a guest
+  looping over cheap `request()` calls is unbounded in wall time unless
+  you pass `:wall_clock_ms` (and the tools' `:max_calls` bound applies at
+  the tool layer regardless); Deno's timeout, by contrast, is a wall-clock
+  deadline that includes callback time. A promise nothing can settle is
+  reported as a deadlock immediately.
 - **`OapiCodemode.Executor.ZapCode`** — execute works end-to-end behind the
   optional `ex_zapcode` dep, but search over real specs is engine-blocked
   (container copy semantics make scans O(n²)), and it runs in-BEAM, so it's

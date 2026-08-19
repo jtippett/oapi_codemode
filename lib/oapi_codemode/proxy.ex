@@ -68,10 +68,91 @@ defmodule OapiCodemode.Proxy do
 
   defp after_match(entry, api_name, op, path_params, query, body, opts, ctx) do
     with :ok <- policy(ctx.policy, op.method),
+         {:ok, extra_headers} <- passthrough_headers(entry.config, opts),
          :ok <- validate(entry.config, op, query, body, path_params),
          {:ok, auth} <- credentials(entry, api_name, op, ctx),
-         :ok <- reserved_query(query, auth) do
-      execute(entry.config, op, path_params, query, body, auth, opts, ctx)
+         :ok <- reserved_query(query, auth),
+         :ok <- reserved_auth_headers(extra_headers, auth) do
+      execute(entry.config, op, path_params, query, body, auth, extra_headers, opts, ctx)
+    end
+  end
+
+  # ele: allowlisted per-call header passthrough (idempotency keys). Names
+  # match case-insensitively and forward downcased. Anything not allowlisted
+  # is an explicit policy error, never a silent drop — a dropped header is
+  # an invisible failure (the model believes its idempotency key arrived).
+  # Headers the library or the credential layer owns are reserved even when
+  # a host allowlists them (C2 sibling).
+  @reserved_headers ~w(authorization proxy-authorization cookie content-type
+                       content-length host transfer-encoding connection)
+
+  defp passthrough_headers(config, opts) do
+    case Map.get(opts, "headers") do
+      nil ->
+        {:ok, []}
+
+      headers when is_map(headers) ->
+        take_allowed(headers, config.passthrough_headers)
+
+      _other ->
+        {:error, %{phase: :policy, message: "headers must be an object of string values"}}
+    end
+  end
+
+  defp take_allowed(headers, allowlist) do
+    allowed = Enum.map(allowlist, &String.downcase/1)
+
+    headers
+    |> Enum.reduce_while({:ok, []}, fn {name, value}, {:ok, acc} ->
+      lower = name |> to_string() |> String.downcase()
+
+      cond do
+        lower in @reserved_headers ->
+          {:halt, policy_error("header #{inspect(lower)} is reserved and cannot be set")}
+
+        lower not in allowed ->
+          {:halt, policy_error(not_allowed_message(lower, allowed))}
+
+        not is_binary(value) ->
+          {:halt, policy_error("header #{inspect(lower)} value must be a string")}
+
+        List.keymember?(acc, lower, 0) ->
+          {:halt, policy_error("duplicate header #{inspect(lower)} (names are case-insensitive)")}
+
+        true ->
+          {:cont, {:ok, [{lower, value} | acc]}}
+      end
+    end)
+    |> case do
+      {:ok, acc} -> {:ok, Enum.reverse(acc)}
+      error -> error
+    end
+  end
+
+  defp policy_error(message), do: {:error, %{phase: :policy, message: message}}
+
+  defp not_allowed_message(name, []),
+    do: "header #{inspect(name)} cannot be sent: this API allows no header passthrough"
+
+  defp not_allowed_message(name, allowed),
+    do:
+      "header #{inspect(name)} is not in this API's passthrough allowlist " <>
+        "(allowed: #{Enum.join(allowed, ", ")})"
+
+  # C2 sibling for headers: a scheme-specific auth header (e.g. an apiKey
+  # header) is reserved even if the host allowlisted its name.
+  defp reserved_auth_headers([], _auth), do: :ok
+
+  defp reserved_auth_headers(extra, auth) do
+    auth_names = Enum.map(auth.headers, fn {name, _} -> String.downcase(name) end)
+
+    case Enum.find(extra, fn {name, _} -> name in auth_names end) do
+      nil ->
+        :ok
+
+      {name, _} ->
+        {:error,
+         %{phase: :policy, message: "header #{inspect(name)} is reserved for authentication"}}
     end
   end
 
@@ -189,14 +270,15 @@ defmodule OapiCodemode.Proxy do
     end
   end
 
-  defp execute(config, op, path_params, query, body, auth, opts, ctx) do
+  defp execute(config, op, path_params, query, body, auth, extra_headers, opts, ctx) do
     with {:ok, query_string} <- build_query_string(op, query, auth),
          {:ok, req_body, content_type} <- encode_body(body, opts) do
       url = build_url(config.base_url, op, path_params)
       full_url = if query_string == "", do: url, else: url <> "?" <> query_string
 
       headers =
-        auth.headers ++ if content_type, do: [{"content-type", content_type}], else: []
+        auth.headers ++
+          if(content_type, do: [{"content-type", content_type}], else: []) ++ extra_headers
 
       req =
         Req.new(

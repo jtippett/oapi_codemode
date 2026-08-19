@@ -655,6 +655,93 @@ defmodule OapiCodemode.ToolsTest do
     end
   end
 
+  # ele P1: an executor whose timeout is a compute-only budget (SafeJS)
+  # cannot bound a run that loops over cheap request() calls, and the
+  # call-log Agent is plain BEAM memory outside any engine cap. :max_calls
+  # bounds both at the layer that owns the loop, for every executor.
+  describe "per-run call limit (:max_calls)" do
+    test "calls beyond the limit are refused and only the first refusal is logged",
+         %{opts: opts} do
+      Req.Test.stub(LimitStub, fn conn -> Req.Test.json(conn, %{}) end)
+
+      Mock.set_response(fn _code, env ->
+        results =
+          for _ <- 1..5 do
+            env.callbacks.request.("petstore", %{
+              "method" => "GET",
+              "path" => "/pets",
+              "query" => %{"limit" => 1}
+            })
+          end
+
+        {:ok, %{value: results, logs: []}}
+      end)
+
+      opts = Keyword.put(opts, :max_calls, 2)
+      execute = Tools.definitions(opts) |> Enum.find(&(&1.name == "execute_api_code"))
+
+      {:ok, result} =
+        execute.handler.(%{"code" => "..."}, %{req_options: [plug: {Req.Test, LimitStub}]})
+
+      decoded = Jason.decode!(result)
+      [r1, r2, r3, _r4, r5] = decoded["result"]
+      assert r1["status"] == 200
+      assert r2["status"] == 200
+      assert r3["error"] =~ "call limit"
+      assert r5["error"] =~ "call limit"
+
+      # Two dispatched calls plus ONE logged refusal — the log must not grow
+      # with further refused attempts, or the limit re-opens the unbounded
+      # memory it exists to close.
+      assert [%{"status" => 200}, %{"status" => 200}, %{"status" => "error"}] = decoded["calls"]
+    end
+
+    test ":infinity disables the limit", %{opts: opts} do
+      Req.Test.stub(LimitStub2, fn conn -> Req.Test.json(conn, %{}) end)
+
+      Mock.set_response(fn _code, env ->
+        results =
+          for _ <- 1..3 do
+            env.callbacks.request.("petstore", %{
+              "method" => "GET",
+              "path" => "/pets",
+              "query" => %{"limit" => 1}
+            })
+          end
+
+        {:ok, %{value: results, logs: []}}
+      end)
+
+      opts = Keyword.put(opts, :max_calls, :infinity)
+      execute = Tools.definitions(opts) |> Enum.find(&(&1.name == "execute_api_code"))
+
+      {:ok, result} =
+        execute.handler.(%{"code" => "..."}, %{req_options: [plug: {Req.Test, LimitStub2}]})
+
+      assert [%{"status" => 200}, %{"status" => 200}, %{"status" => 200}] =
+               Jason.decode!(result)["result"]
+    end
+
+    test "a junk :max_calls raises at definitions time", %{opts: opts} do
+      assert_raise ArgumentError, fn ->
+        Tools.definitions(Keyword.put(opts, :max_calls, 0))
+      end
+
+      assert_raise ArgumentError, fn ->
+        Tools.definitions(Keyword.put(opts, :max_calls, "10"))
+      end
+    end
+
+    test "a wall-clock executor error surfaces as data in the envelope", %{opts: opts} do
+      Mock.set_response(fn _c, _e -> {:error, {:wall_clock, 250}} end)
+
+      execute = Tools.definitions(opts) |> Enum.find(&(&1.name == "execute_api_code"))
+      {:ok, result} = execute.handler.(%{"code" => "..."}, %{})
+
+      assert Jason.decode!(result)["error"] =~ "wall-clock"
+    end
+  end
+
   describe "search_tool_name/execute_tool_name collision guard (M1)" do
     test "raises when the two names collide via explicit execute_tool_name", %{opts: opts} do
       bad_opts = Keyword.put(opts, :execute_tool_name, "search_apis")

@@ -868,4 +868,151 @@ defmodule OapiCodemode.ProxyTest do
                       %{operation: nil, error: :match}}
     end
   end
+
+  # ele: allowlisted per-call header passthrough (idempotency keys). Names
+  # match case-insensitively and forward downcased. Anything not allowlisted
+  # is an explicit policy error, not a silent drop — a dropped header is an
+  # invisible failure (the model believes its idempotency key arrived).
+  describe "header passthrough" do
+    defp with_passthrough(entry, names) do
+      %{entry | config: %{entry.config | passthrough_headers: names}}
+    end
+
+    test "an allowlisted header reaches the upstream, case-insensitively", %{
+      entry: entry,
+      ctx: ctx
+    } do
+      Req.Test.stub(OapiCodemodeStub, fn conn ->
+        assert Plug.Conn.get_req_header(conn, "idempotency-key") == ["idem-123"]
+        assert Plug.Conn.get_req_header(conn, "authorization") == ["Bearer tok-1"]
+        Req.Test.json(conn, %{})
+      end)
+
+      entry = with_passthrough(entry, ["idempotency-key"])
+
+      assert {:ok, %{status: 200}} =
+               Proxy.request(
+                 entry,
+                 "petstore",
+                 %{
+                   "method" => "GET",
+                   "path" => "/pets",
+                   "query" => %{"limit" => 5},
+                   "headers" => %{"Idempotency-Key" => "idem-123"}
+                 },
+                 ctx
+               )
+    end
+
+    test "a header off the allowlist is a policy error naming the allowed set", %{
+      entry: entry,
+      ctx: ctx
+    } do
+      entry = with_passthrough(entry, ["idempotency-key"])
+
+      assert {:error, %{phase: :policy, message: msg}} =
+               Proxy.request(
+                 entry,
+                 "petstore",
+                 %{"method" => "GET", "path" => "/pets", "headers" => %{"x-custom" => "v"}},
+                 ctx
+               )
+
+      assert msg =~ "x-custom"
+      assert msg =~ "idempotency-key"
+    end
+
+    test "with no allowlist configured, any header is a policy error", %{entry: entry, ctx: ctx} do
+      assert {:error, %{phase: :policy, message: msg}} =
+               Proxy.request(
+                 entry,
+                 "petstore",
+                 %{
+                   "method" => "GET",
+                   "path" => "/pets",
+                   "headers" => %{"idempotency-key" => "v"}
+                 },
+                 ctx
+               )
+
+      assert msg =~ "no header passthrough"
+    end
+
+    test "credential and library headers are reserved even when allowlisted", %{
+      entry: entry,
+      ctx: ctx
+    } do
+      entry = with_passthrough(entry, ["authorization", "content-type"])
+
+      assert {:error, %{phase: :policy, message: msg}} =
+               Proxy.request(
+                 entry,
+                 "petstore",
+                 %{
+                   "method" => "GET",
+                   "path" => "/pets",
+                   "headers" => %{"Authorization" => "Bearer forged"}
+                 },
+                 ctx
+               )
+
+      assert msg =~ "reserved"
+
+      assert {:error, %{phase: :policy, message: msg2}} =
+               Proxy.request(
+                 entry,
+                 "petstore",
+                 %{
+                   "method" => "GET",
+                   "path" => "/pets",
+                   "headers" => %{"content-type" => "text/csv"}
+                 },
+                 ctx
+               )
+
+      assert msg2 =~ "reserved"
+    end
+
+    test "non-map headers and non-string values are policy errors", %{entry: entry, ctx: ctx} do
+      entry = with_passthrough(entry, ["idempotency-key"])
+
+      assert {:error, %{phase: :policy, message: msg}} =
+               Proxy.request(
+                 entry,
+                 "petstore",
+                 %{"method" => "GET", "path" => "/pets", "headers" => ["idempotency-key"]},
+                 ctx
+               )
+
+      assert msg =~ "object"
+
+      assert {:error, %{phase: :policy, message: msg2}} =
+               Proxy.request(
+                 entry,
+                 "petstore",
+                 %{"method" => "GET", "path" => "/pets", "headers" => %{"idempotency-key" => 5}},
+                 ctx
+               )
+
+      assert msg2 =~ "string"
+    end
+
+    test "two spellings collapsing to one header name are rejected", %{entry: entry, ctx: ctx} do
+      entry = with_passthrough(entry, ["idempotency-key"])
+
+      assert {:error, %{phase: :policy, message: msg}} =
+               Proxy.request(
+                 entry,
+                 "petstore",
+                 %{
+                   "method" => "GET",
+                   "path" => "/pets",
+                   "headers" => %{"Idempotency-Key" => "a", "idempotency-key" => "b"}
+                 },
+                 ctx
+               )
+
+      assert msg =~ "duplicate"
+    end
+  end
 end

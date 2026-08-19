@@ -15,6 +15,50 @@ Format per entry:
 
 <!-- entries below -->
 
+## 2026-08-19 — ele — SafeJS compute-budget timeout reopens the unbounded-callback-traffic bug class
+
+**What happened:** Adopting `Executor.SafeJS` in ele (swapping off
+Quicksand) reintroduced a problem this log already records the Deno
+executor fixing ("callback traffic cannot outlive the timeout — deadline,
+not idle timer"). ex_safejs's `:timeout` is a JS *compute* budget that
+deliberately excludes host-callback time — the moduledoc presents this as
+a feature ("a slow host call never reads as guest misbehavior"), and for
+a single call it is. But it means the engine can never end a script that
+loops over cheap `apis.<name>.request(...)` calls: each call's host time
+is free, so the run's wall-clock duration is unbounded. Any host that
+meters runs (a concurrency semaphore, billing, a request deadline) loses
+its bound, and `Tools.execute`'s call-log `Agent` — plain BEAM memory,
+outside the engine's `memory_limit` — grows one entry per call, without
+limit. Ele caught this in review (P1) and wrapped SafeJS in its own
+executor: run the eval in a `Task`, `Task.yield(wall_clock_ms) ||
+Task.shutdown(:brutal_kill)`, return `{:error, {:timeout, ms}}`. That
+works well — killing the task cancels the in-flight callback with it, the
+call-log Agent lives in the handler's process so the envelope still
+reports completed calls, and the killed process's runtime resource is
+reclaimed — but every adopting host would have to know to build it.
+**What the library should do differently:** Give `Executor.SafeJS` a
+`:wall_clock_ms` option doing exactly the Task-wrap above (or push a real
+wall deadline into ex_safejs's interrupt handler, which would also
+re-bound a run the moment a callback returns). Independently,
+`Tools.execute` could take a `:max_calls` per run so the call log is
+bounded even under an executor with no wall clock. The Deno executor's
+deadline covers callbacks; the executor-status docs should state per
+executor whether the timeout is wall-clock or compute-only — that
+difference is a resource-bound contract, not an implementation detail.
+**Severity:** blocking (for any host metering runs; worked around in ele)
+**Resolved:** this commit — three layers, per the entry's own asks:
+`Executor.SafeJS` takes `:wall_clock_ms` (unlinked worker killed at the
+deadline → `{:error, {:wall_clock, ms}}`, straggler-safe for trap_exit
+callers, distinct from `{:timeout, ms}` so hosts can tell compute
+exhaustion from wall time); `Tools` bounds EVERY executor with
+`:max_calls` (default 100, `:infinity` opt-out; slot-reserved so
+concurrent callbacks can't race past it; only the first refusal is
+logged so the call log itself stays bounded); and the SafeJS moduledoc,
+README executor list, and gentility guide now state per executor whether
+the timeout is wall-clock or compute-only. The in-engine wall deadline
+(re-bound on callback return) is queued in the ex_safejs ROADMAP — ele
+can drop its Task-wrap in favor of `:wall_clock_ms` now.
+
 ## 2026-08-19 — ele — library does not compile as a dependency (optional-dep struct expansion)
 
 **What happened:** First `mix deps.compile oapi_codemode` in ele after the
@@ -33,6 +77,35 @@ keeping: compile the library in a scratch project with NO optional deps.
 **Severity:** blocking
 **Resolved:** this commit
 
+## 2026-08-19 — ele — no per-call header passthrough (re-log; idempotency keys blocked)
+
+**What happened:** Re-recording an entry originally written 2026-08-17
+that was lost from this file during the executor work (ele's design doc
+and PR notes still cite it). Sandbox JS can put a `headers` key in the
+request options object, but nothing library-side reads it: there is no
+path from sandbox-supplied data into outgoing request headers
+(`bootstrap`/preamble → `Proxy.request/4`, re-verified against the
+Quicksand executor 2026-08-19). ele wants an allowlisted passthrough —
+concretely `idempotency-key` — so a model that replays a mutation after a
+step-up round-trip dedupes server-side. Until then
+`execute_ele_api_mutations`' description carries "never replay a
+completed call" as the only protection.
+**What the library should do differently:** Read an optional `headers`
+map from the request options and forward only host-allowlisted keys
+(per-API config, e.g. `ApiConfig.passthrough_headers`), dropping
+everything else. Alternatively let the host's credential resolver see and
+amend outgoing headers per call.
+**Severity:** annoying
+**Resolved:** this commit — `ApiConfig.passthrough_headers` allowlist;
+the request options' `headers` map forwards allowlisted names
+(case-insensitive in, downcased out). One deliberate divergence from the
+ask: a non-allowlisted header is an explicit `[policy]` error naming the
+allowed set, NOT a silent drop — a dropped idempotency key is an
+invisible failure, the model must learn immediately that its header
+never arrived. Credential and library headers (authorization, cookie,
+content-type, ...) are reserved even when allowlisted, and a
+scheme-specific auth header is rejected post-attach (C2 sibling).
+
 ## 2026-08-19 — ele — tool descriptions are executor-unaware (async dialect on a sync engine)
 
 **What happened:** `Tools.Descriptions` (and `Tools`' `@code_schema`) teach
@@ -50,6 +123,11 @@ executor for its contract text (a `code_contract/0` callback on
 the engine actually configured. Once emitted text is executor-correct, ele
 can return to pin-to-emitted verbatim (its preferred drift guard).
 **Severity:** annoying
+**Resolved:** overtaken by events, 2026-08-19 — the ex_safejs fork fixed
+the async contract, so every shipping executor now runs the dialect the
+emitter teaches and ele's pinned text matches it again. A
+`code_contract/0` callback would still be the right shape if a
+sync-only executor ever returns.
 
 ## 2026-08-16 — gentility — schemeless specs cannot be credentialed
 

@@ -16,10 +16,23 @@ defmodule OapiCodemode.Executor.SafeJS do
   `apis.<name>.request(...)` blocks the JS thread while the Elixir callback
   runs and returns the response as a plain value, which `await` passes
   through unchanged; `Promise.all` over several requests therefore executes
-  them serially, not concurrently. Host-callback time does not count against
-  the sandbox timeout (it is a JS compute budget), and a promise that
-  nothing can ever settle is reported as a deadlock error immediately
-  instead of burning the timeout.
+  them serially, not concurrently. A promise that nothing can ever settle
+  is reported as a deadlock error immediately instead of burning the
+  timeout.
+
+  ## Timeout is compute-only — wall clock is a separate opt
+
+  `:timeout` is a JS *compute* budget: host-callback time does not count
+  against it. For a single slow call that's a feature (a slow host call
+  never reads as guest misbehavior), but it means a guest looping over
+  cheap `request()` calls has **unbounded wall-clock time** — the engine
+  can never end it (ele P1). Hosts that meter runs (semaphores, billing,
+  request deadlines) must pass `:wall_clock_ms`: the eval then runs in a
+  throwaway worker killed at that deadline, returning
+  `{:error, {:wall_clock, ms}}` (logs captured before the kill are lost).
+  `OapiCodemode.Tools`' `:max_calls` bounds the same class at the tool
+  layer for every executor. `Executor.Deno`'s timeout, by contrast, is a
+  wall-clock deadline that includes callback time.
 
   Injection differs from Deno: ex_safejs has no globals API, so
   `env.globals` is handed in through a host callback that returns the map
@@ -54,9 +67,48 @@ defmodule OapiCodemode.Executor.SafeJS do
 
   @impl true
   def run(code, env, opts) do
+    case Keyword.get(opts, :wall_clock_ms) do
+      nil -> safe_run(code, env, opts)
+      wall when is_integer(wall) and wall > 0 -> walled_run(code, env, opts, wall)
+    end
+  end
+
+  defp safe_run(code, env, opts) do
     do_run(code, env, opts)
   rescue
     e -> {:error, {:raised, Exception.message(e)}}
+  end
+
+  # ele P1: `:timeout` is a JS compute budget that excludes host-callback
+  # time, so a guest looping over cheap `request()` calls is otherwise
+  # unbounded in wall time. `:wall_clock_ms` runs the eval (and therefore
+  # its callbacks) in an unlinked, monitored worker and kills it at the
+  # deadline. The kill takes any in-flight callback with the worker;
+  # ex_safejs 0.3.1's dead-caller detection unblocks the runtime thread and
+  # the runtime resource is reclaimed on GC. Logs captured before the kill
+  # die with the worker's pdict — only the error shape survives.
+  defp walled_run(code, env, opts, wall) do
+    owner = self()
+    ref = make_ref()
+
+    # Unlinked: a linked worker would hand a trap_exit caller an {:EXIT, _}
+    # message — the straggler class run/3 must never produce. safe_run/3 is
+    # total, so the worker's normal return carries the result.
+    {worker, mon} = spawn_monitor(fn -> send(owner, {ref, safe_run(code, env, opts)}) end)
+
+    receive do
+      {^ref, result} ->
+        Process.demonitor(mon, [:flush])
+        result
+
+      {:DOWN, ^mon, :process, ^worker, reason} ->
+        {:error, {:raised, "sandbox worker exited: #{inspect(reason)}"}}
+    after
+      wall ->
+        Process.exit(worker, :kill)
+        Process.demonitor(mon, [:flush])
+        {:error, {:wall_clock, wall}}
+    end
   end
 
   defp do_run(code, env, opts) do

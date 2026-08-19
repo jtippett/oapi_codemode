@@ -10,6 +10,11 @@ defmodule OapiCodemode.Tools do
     * `:resolver` (required) — module implementing OapiCodemode.Credentials
     * `:policy` — :read_only (default) or :all
     * `:max_result_tokens` — default 6000
+    * `:max_calls` — max intercepted `request()` calls per execute run,
+      default 100; `:infinity` disables. Calls beyond the limit return an
+      error payload to the sandbox; only the first refusal is logged, so
+      the call log stays bounded even under an executor whose timeout is
+      compute-only (ele P1; see `Executor.SafeJS`)
     * `:timeout` — sandbox timeout ms, default 30_000
     * `:executor_opts` — extra keyword opts forwarded verbatim to the
       executor's `run/3` (e.g. `[limits: %{max_memory: 256_000_000}]` for
@@ -102,6 +107,13 @@ defmodule OapiCodemode.Tools do
       raise ArgumentError,
             "search_tool_name and execute_tool_name must differ " <>
               "(both were #{inspect(search_tool_name)})"
+    end
+
+    max_calls = max_calls(opts)
+
+    unless max_calls == :infinity or (is_integer(max_calls) and max_calls > 0) do
+      raise ArgumentError,
+            ":max_calls must be a positive integer or :infinity, got: #{inspect(max_calls)}"
     end
 
     search_tools =
@@ -212,8 +224,10 @@ defmodule OapiCodemode.Tools do
 
     # I1: unlinked, so a late Agent crash can't propagate into the host's
     # caller process, and stopped in an `after` so no execute path — raise,
-    # error, timeout — can leak it.
-    {:ok, calls} = Agent.start(fn -> [] end)
+    # error, timeout — can leak it. State is {reserved_count, entries}:
+    # slots are reserved before dispatch so concurrent callbacks (Deno runs
+    # them in Tasks) cannot race past :max_calls.
+    {:ok, calls} = Agent.start(fn -> {0, []} end)
 
     try do
       do_execute(code, host_ctx, opts, registry, metas, calls)
@@ -234,26 +248,42 @@ defmodule OapiCodemode.Tools do
 
     annotate = Map.get(host_ctx, :annotate_call, fn _payload -> %{} end)
 
+    max_calls = max_calls(opts)
+
     request_callback = fn
       api_name, req_opts when is_map(req_opts) ->
         started = System.monotonic_time(:millisecond)
         operation = operation_label(req_opts)
 
-        {payload, status} = dispatch(registry, metas, api_name, req_opts, ctx)
+        # ele P1: bound the number of calls per run. The first over-limit
+        # attempt is recorded so the operator sees it; further attempts get
+        # the error payload WITHOUT a log entry — otherwise refusals would
+        # re-open the unbounded call-log growth the limit exists to close.
+        case reserve_call(calls, max_calls) do
+          :drop ->
+            limit_error(max_calls)
 
-        # Annotation merges under the base keys: a host classifier adds to
-        # an entry, it never rewrites what the library recorded.
-        entry =
-          Map.merge(annotate.(payload), %{
-            "api" => api_name,
-            "operation" => operation,
-            "status" => status_label(status),
-            "duration_ms" => System.monotonic_time(:millisecond) - started
-          })
+          verdict ->
+            {payload, status} =
+              case verdict do
+                :dispatch -> dispatch(registry, metas, api_name, req_opts, ctx)
+                :record_refusal -> {limit_error(max_calls), :error}
+              end
 
-        record(calls, entry)
+            # Annotation merges under the base keys: a host classifier adds
+            # to an entry, it never rewrites what the library recorded.
+            entry =
+              Map.merge(annotate.(payload), %{
+                "api" => api_name,
+                "operation" => operation,
+                "status" => status_label(status),
+                "duration_ms" => System.monotonic_time(:millisecond) - started
+              })
 
-        payload
+            record(calls, entry)
+
+            payload
+        end
 
       # M4: `apis.x.request("GET /pets")` — a shape mistake the model can fix.
       _api_name, _req_opts ->
@@ -336,18 +366,42 @@ defmodule OapiCodemode.Tools do
   defp name_list([]), do: "(none)"
   defp name_list(names), do: Enum.join(names, ", ")
 
+  defp max_calls(opts), do: Keyword.get(opts, :max_calls, 100)
+
+  defp reserve_call(_agent, :infinity), do: :dispatch
+
+  defp reserve_call(agent, max) do
+    Agent.get_and_update(agent, fn {reserved, entries} ->
+      cond do
+        reserved < max -> {:dispatch, {reserved + 1, entries}}
+        reserved == max -> {:record_refusal, {reserved + 1, entries}}
+        true -> {:drop, {reserved, entries}}
+      end
+    end)
+  catch
+    :exit, _ -> :drop
+  end
+
+  defp limit_error(max) do
+    %{
+      "error" =>
+        "call limit reached: this run has used all #{max} API calls it is " <>
+          "allowed. Finish with the data you already have."
+    }
+  end
+
   # I1: the executor is expected to cancel outstanding callback work when a
   # run times out (the Deno executor kills the subprocess), but Elixir-side
   # Tasks already in flight can still land here after the Agent is gone.
   # Tolerate that rather than crashing a task nobody is waiting on.
   defp record(agent, entry) do
-    Agent.update(agent, &[entry | &1])
+    Agent.update(agent, fn {reserved, entries} -> {reserved, [entry | entries]} end)
   catch
     :exit, _ -> :ok
   end
 
   defp safe_get(agent) do
-    Agent.get(agent, &Enum.reverse/1)
+    Agent.get(agent, fn {_reserved, entries} -> Enum.reverse(entries) end)
   catch
     :exit, _ -> []
   end
@@ -381,6 +435,10 @@ defmodule OapiCodemode.Tools do
   # with an error still carries whatever console.log output happened
   # before the crash) — those logs must reach the caller, not be dropped.
   defp normalize_error({:timeout, ms}), do: {"sandbox timed out after #{ms} ms", []}
+
+  defp normalize_error({:wall_clock, ms}),
+    do: {"run exceeded its wall-clock budget of #{ms} ms (host API-call time included)", []}
+
   defp normalize_error({:raised, message}), do: {"sandbox error: #{sanitize(message)}", []}
 
   defp normalize_error(%{message: message, logs: logs}) when is_list(logs),

@@ -1,7 +1,7 @@
 defmodule OapiCodemode.MixProject do
   use Mix.Project
 
-  @version "0.1.0"
+  @version "0.2.0"
   @source_url "https://github.com/jtippett/oapi_codemode"
 
   def project do
@@ -41,6 +41,7 @@ defmodule OapiCodemode.MixProject do
       {:telemetry, "~> 1.2"},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:plug, "~> 1.16", only: :test},
+      {:stream_data, "~> 1.1", only: [:dev, :test]},
       # Optional: only needed for OapiCodemode.Executor.SafeJS (QuickJS-NG,
       # our hard fork of quicksand). Optional deps aren't pulled in by
       # consumers automatically — add ex_safejs alongside this library to

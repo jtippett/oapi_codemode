@@ -79,4 +79,38 @@ defmodule OapiCodemode.RegistryTest do
     {:ok, entry} = Registry.lookup(reg, "petstore")
     assert entry.config.base_url == "https://two.example.com"
   end
+
+  # I3: the per-call hot paths (search's specs handoff, execute's
+  # apiNames/context globals) must not pay an ETS copy of every full
+  # artifact on each tool call. sandbox_meta is the projected read: the
+  # spec pre-encoded to JSON once at registration (a refc binary, shared
+  # not copied) plus the model-visible sandbox_globals.
+  describe "sandbox_meta" do
+    test "returns spec_json and sandbox_globals per API, sorted by name", %{reg: reg, art: art} do
+      :ok = Registry.register(reg, "zebra", art, %ApiConfig{})
+
+      :ok =
+        Registry.register(reg, "petstore", art, %ApiConfig{
+          sandbox_globals: %{"account_id" => "acc_1"}
+        })
+
+      assert [{"petstore", pet}, {"zebra", zebra}] = Registry.sandbox_meta(reg)
+      assert pet.sandbox_globals == %{"account_id" => "acc_1"}
+      assert zebra.sandbox_globals == %{}
+      assert Jason.decode!(pet.spec_json) == art.spec
+    end
+
+    test "re-registration refreshes the cached spec_json", %{reg: reg, art: art} do
+      :ok = Registry.register(reg, "petstore", art, %ApiConfig{})
+      changed = %{art | spec: Map.put(art.spec, "info", %{"title" => "Petstore v2"})}
+      :ok = Registry.register(reg, "petstore", changed, %ApiConfig{})
+
+      assert [{"petstore", meta}] = Registry.sandbox_meta(reg)
+      assert Jason.decode!(meta.spec_json)["info"]["title"] == "Petstore v2"
+    end
+
+    test "empty registry yields an empty meta list", %{reg: reg} do
+      assert Registry.sandbox_meta(reg) == []
+    end
+  end
 end

@@ -36,7 +36,7 @@ defmodule OapiCodemode.ToolsTest do
   test "search runs code against specs global and JSON-encodes the result", %{opts: opts} do
     Mock.set_response(fn code, env ->
       assert code =~ "spec"
-      assert %{"petstore" => %{"paths" => _}} = env.globals["specs"]
+      assert %{"petstore" => %{"paths" => _}} = Jason.decode!(env.globals["__oapi_specs_json"])
       {:ok, %{value: [%{"path" => "/pets"}], logs: []}}
     end)
 
@@ -536,6 +536,125 @@ defmodule OapiCodemode.ToolsTest do
   # layer, keyed by name, can only see one of them) or, worse, an execute
   # description pointing the model at itself as "the search tool". This is
   # a config mistake, so it must fail loudly at definitions/1 time.
+  # I3: search hands the specs to the sandbox as one pre-encoded JSON string
+  # (cached per registration in the Registry) parsed guest-side — measured 3x
+  # cheaper than term conversion for a multi-MB spec — and wraps the model's
+  # arrow so `specs` is in place before it runs. The model-visible contract
+  # (`specs.<name>`) is unchanged.
+  describe "search specs JSON handoff (I3)" do
+    test "globals carry the encoded specs; the wrapper defines `specs` around the model's code",
+         %{opts: opts} do
+      Mock.set_response(fn code, env ->
+        refute Map.has_key?(env.globals, "specs")
+        assert %{"petstore" => %{"paths" => _}} = Jason.decode!(env.globals["__oapi_specs_json"])
+        assert code =~ "JSON.parse"
+        assert code =~ "Object.keys(specs)"
+        {:ok, %{value: nil, logs: []}}
+      end)
+
+      search = Tools.definitions(opts) |> Enum.find(&(&1.name == "search_apis"))
+      assert {:ok, _} = search.handler.(%{"code" => "async () => Object.keys(specs)"}, %{})
+    end
+  end
+
+  # Design §5.3: optional per-call API allowlist from host context. The
+  # guarantee is enforced at the request-dispatch boundary; filtering the
+  # globals on top just keeps the model from being shown APIs it cannot call.
+  describe "per-call API allowlist" do
+    setup %{reg: reg} do
+      {:ok, art} = Ingest.ingest(Fixtures.clean_3_1())
+      :ok = Registry.register(reg, "other", art, %ApiConfig{sandbox_globals: %{"id" => "o1"}})
+      :ok
+    end
+
+    test "execute filters apiNames and context to the allowlist", %{opts: opts} do
+      Mock.set_response(fn _code, env ->
+        assert env.globals["apiNames"] == ["other"]
+        assert env.globals["context"] == %{"other" => %{"id" => "o1"}}
+        {:ok, %{value: nil, logs: []}}
+      end)
+
+      execute = Tools.definitions(opts) |> Enum.find(&(&1.name == "execute_api_code"))
+      assert {:ok, _} = execute.handler.(%{"code" => "..."}, %{api_allowlist: ["other"]})
+    end
+
+    test "a request to a disallowed API is blocked at dispatch, naming the permitted set",
+         %{opts: opts} do
+      Mock.set_response(fn _code, env ->
+        result = env.callbacks.request.("other", %{"method" => "GET", "path" => "/pets"})
+        {:ok, %{value: result, logs: []}}
+      end)
+
+      execute = Tools.definitions(opts) |> Enum.find(&(&1.name == "execute_api_code"))
+
+      {:ok, result} = execute.handler.(%{"code" => "..."}, %{api_allowlist: ["petstore"]})
+      decoded = Jason.decode!(result)
+
+      assert decoded["result"]["error"] =~ "not permitted"
+      assert decoded["result"]["error"] =~ "petstore"
+      # The blocked attempt is still a call the operator should see (M9).
+      assert [%{"api" => "other", "status" => "error"}] = decoded["calls"]
+    end
+
+    test "search shows only the allowed specs", %{opts: opts} do
+      Mock.set_response(fn _code, env ->
+        assert env.globals["__oapi_specs_json"] |> Jason.decode!() |> Map.keys() == ["petstore"]
+        {:ok, %{value: nil, logs: []}}
+      end)
+
+      search = Tools.definitions(opts) |> Enum.find(&(&1.name == "search_apis"))
+      assert {:ok, _} = search.handler.(%{"code" => "..."}, %{api_allowlist: ["petstore"]})
+    end
+
+    test "an absent allowlist means every registered API", %{opts: opts} do
+      Mock.set_response(fn _code, env ->
+        assert env.globals["apiNames"] == ["other", "petstore"]
+        {:ok, %{value: nil, logs: []}}
+      end)
+
+      execute = Tools.definitions(opts) |> Enum.find(&(&1.name == "execute_api_code"))
+      assert {:ok, _} = execute.handler.(%{"code" => "..."}, %{})
+    end
+
+    test "an empty allowlist means no APIs at all", %{opts: opts} do
+      Mock.set_response(fn _code, env ->
+        assert env.globals["apiNames"] == []
+        refute Map.has_key?(env.globals, "context")
+        {:ok, %{value: nil, logs: []}}
+      end)
+
+      execute = Tools.definitions(opts) |> Enum.find(&(&1.name == "execute_api_code"))
+      assert {:ok, _} = execute.handler.(%{"code" => "..."}, %{api_allowlist: []})
+    end
+
+    test "allowlist entries for unregistered APIs are inert", %{opts: opts} do
+      Mock.set_response(fn _code, env ->
+        assert env.globals["apiNames"] == ["petstore"]
+        {:ok, %{value: nil, logs: []}}
+      end)
+
+      execute = Tools.definitions(opts) |> Enum.find(&(&1.name == "execute_api_code"))
+
+      assert {:ok, _} =
+               execute.handler.(%{"code" => "..."}, %{api_allowlist: ["petstore", "ghost"]})
+    end
+
+    # A malformed allowlist is a host bug, not a model mistake — raise like
+    # the M1 collision guard rather than feeding the model an error it
+    # cannot act on.
+    test "a non-list or non-binary allowlist raises", %{opts: opts} do
+      execute = Tools.definitions(opts) |> Enum.find(&(&1.name == "execute_api_code"))
+
+      assert_raise ArgumentError, fn ->
+        execute.handler.(%{"code" => "..."}, %{api_allowlist: "petstore"})
+      end
+
+      assert_raise ArgumentError, fn ->
+        execute.handler.(%{"code" => "..."}, %{api_allowlist: [:petstore]})
+      end
+    end
+  end
+
   describe "search_tool_name/execute_tool_name collision guard (M1)" do
     test "raises when the two names collide via explicit execute_tool_name", %{opts: opts} do
       bad_opts = Keyword.put(opts, :execute_tool_name, "search_apis")

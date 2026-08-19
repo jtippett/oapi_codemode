@@ -51,14 +51,34 @@ defmodule OapiCodemode.Registry do
     table = GenServer.call(server, :table)
 
     case :ets.lookup(table, api_name) do
-      [{^api_name, entry}] -> {:ok, entry}
+      [{^api_name, entry, _meta}] -> {:ok, entry}
       [] -> {:error, :unknown_api}
     end
   end
 
   @spec list(GenServer.server()) :: [{String.t(), %Entry{}}]
   def list(server) do
-    server |> GenServer.call(:table) |> :ets.tab2list() |> Enum.sort()
+    server
+    |> GenServer.call(:table)
+    |> :ets.select([{{:"$1", :"$2", :_}, [], [{{:"$1", :"$2"}}]}])
+    |> Enum.sort()
+  end
+
+  @doc """
+  Projected read for the per-call hot paths (I3): each API's spec
+  pre-encoded to JSON at registration — a refc binary, so reads share it
+  rather than copy it — plus its model-visible `sandbox_globals`. Sorted by
+  API name. Unlike `list/1`, this never copies full artifacts out of ETS,
+  which costs tens of ms per call on multi-MB specs.
+  """
+  @spec sandbox_meta(GenServer.server()) :: [
+          {String.t(), %{spec_json: String.t(), sandbox_globals: map()}}
+        ]
+  def sandbox_meta(server) do
+    server
+    |> GenServer.call(:table)
+    |> :ets.select([{{:"$1", :_, :"$2"}, [], [{{:"$1", :"$2"}}]}])
+    |> Enum.sort()
   end
 
   @impl true
@@ -73,8 +93,15 @@ defmodule OapiCodemode.Registry do
         {:reply, {:error, :no_base_url}, state}
 
       base_url ->
-        entry = %Entry{artifact: artifact, config: %{config | base_url: base_url}}
-        :ets.insert(state.table, {name, entry})
+        config = %{config | base_url: base_url}
+        entry = %Entry{artifact: artifact, config: config}
+
+        meta = %{
+          spec_json: Jason.encode!(artifact.spec),
+          sandbox_globals: config.sandbox_globals
+        }
+
+        :ets.insert(state.table, {name, entry, meta})
         {:reply, :ok, state}
     end
   end

@@ -36,7 +36,14 @@ defmodule OapiCodemode.Tools do
 
   Handler contract: `handler.(args, host_ctx) -> {:ok, json_string} | {:error, message}`.
   `host_ctx` may carry `:context` (opaque identity for the credential
-  resolver, never exposed to the sandbox), `:req_options` (extra Req
+  resolver, never exposed to the sandbox), `:api_allowlist` (a list of
+  registered API names this call may see and address — design §5 step 3,
+  gentility's `net_allowed_urls` pattern; absent means all, `[]` means
+  none; enforced at the request-dispatch boundary, with the sandbox
+  globals filtered to match — but note the tool *descriptions* are built at
+  `definitions/1` time and are not allowlist-aware, so a host scoping per
+  call should emit per-scope definitions if the description must not name
+  the full set), `:req_options` (extra Req
   options, e.g. Req.Test plugs), and `:annotate_call` (a
   `payload -> map()` function run host-side on each intercepted call's
   response payload; its result is merged into that call's log entry, base
@@ -133,11 +140,13 @@ defmodule OapiCodemode.Tools do
     search_tools ++ [execute_tool]
   end
 
-  defp search(%{"code" => code}, _host_ctx, opts) when is_binary(code) do
-    entries = Registry.list(Keyword.fetch!(opts, :registry))
-    globals = %{"specs" => Map.new(entries, fn {name, e} -> {name, e.artifact.spec} end)}
+  defp search(%{"code" => code}, host_ctx, opts) when is_binary(code) do
+    metas =
+      opts |> Keyword.fetch!(:registry) |> Registry.sandbox_meta() |> allowed(host_ctx)
 
-    case run_sandbox(opts, code, %{globals: globals, callbacks: %{}}) do
+    globals = %{"__oapi_specs_json" => specs_json(metas)}
+
+    case run_sandbox(opts, wrap_with_specs(code), %{globals: globals, callbacks: %{}}) do
       {:ok, %{value: value}} -> Result.encode(value, max_tokens(opts))
       {:error, reason} -> {:error, elem(normalize_error(reason), 0)}
     end
@@ -148,9 +157,58 @@ defmodule OapiCodemode.Tools do
   # into the host's tool loop.
   defp search(_args, _host_ctx, _opts), do: {:error, "missing required argument: code"}
 
+  # I3: the specs reach the sandbox as one pre-encoded JSON string (cached
+  # per registration) parsed guest-side — measured 3x cheaper than term
+  # conversion for a multi-MB spec. Assembled by splicing the cached
+  # per-API JSON; nothing is re-encoded here.
+  defp specs_json(metas) do
+    IO.iodata_to_binary([
+      "{",
+      Enum.map_intersperse(metas, ",", fn {name, meta} ->
+        [Jason.encode!(name), ":", meta.spec_json]
+      end),
+      "}"
+    ])
+  end
+
+  # The model's arrow arrives untouched inside the wrapper; `await` passes
+  # sync-arrow return values through unchanged. `specs` is a lexical const
+  # the nested arrow closes over — no globalThis, which zapcode forbids in
+  # its sandbox.
+  defp wrap_with_specs(code) do
+    """
+    async () => {
+      const specs = JSON.parse(__oapi_specs_json);
+      return await (#{code})();
+    }
+    """
+  end
+
+  # Design §5 step 3: optional per-call API allowlist from host context
+  # (gentility's net_allowed_urls pattern). A malformed allowlist is a host
+  # bug, not a model mistake — raise, like the M1 name-collision guard.
+  defp allowed(metas, host_ctx) do
+    case Map.get(host_ctx, :api_allowlist) do
+      nil ->
+        metas
+
+      names when is_list(names) ->
+        unless Enum.all?(names, &is_binary/1) do
+          raise ArgumentError,
+                ":api_allowlist must be a list of API name strings, got: #{inspect(names)}"
+        end
+
+        Enum.filter(metas, fn {name, _} -> name in names end)
+
+      other ->
+        raise ArgumentError,
+              ":api_allowlist must be a list of API name strings, got: #{inspect(other)}"
+    end
+  end
+
   defp execute(%{"code" => code}, host_ctx, opts) when is_binary(code) do
     registry = Keyword.fetch!(opts, :registry)
-    entries = Registry.list(registry)
+    metas = registry |> Registry.sandbox_meta() |> allowed(host_ctx)
 
     # I1: unlinked, so a late Agent crash can't propagate into the host's
     # caller process, and stopped in an `after` so no execute path — raise,
@@ -158,7 +216,7 @@ defmodule OapiCodemode.Tools do
     {:ok, calls} = Agent.start(fn -> [] end)
 
     try do
-      do_execute(code, host_ctx, opts, registry, entries, calls)
+      do_execute(code, host_ctx, opts, registry, metas, calls)
     after
       safe_stop(calls)
     end
@@ -166,7 +224,7 @@ defmodule OapiCodemode.Tools do
 
   defp execute(_args, _host_ctx, _opts), do: {:error, "missing required argument: code"}
 
-  defp do_execute(code, host_ctx, opts, registry, entries, calls) do
+  defp do_execute(code, host_ctx, opts, registry, metas, calls) do
     ctx = %{
       resolver: Keyword.fetch!(opts, :resolver),
       context: Map.get(host_ctx, :context, %{}),
@@ -181,7 +239,7 @@ defmodule OapiCodemode.Tools do
         started = System.monotonic_time(:millisecond)
         operation = operation_label(req_opts)
 
-        {payload, status} = dispatch(registry, entries, api_name, req_opts, ctx)
+        {payload, status} = dispatch(registry, metas, api_name, req_opts, ctx)
 
         # Annotation merges under the base keys: a host classifier adds to
         # an entry, it never rewrites what the library recorded.
@@ -203,8 +261,8 @@ defmodule OapiCodemode.Tools do
     end
 
     globals =
-      %{"apiNames" => Enum.map(entries, fn {name, _} -> name end)}
-      |> Map.merge(context_globals(entries))
+      %{"apiNames" => Enum.map(metas, fn {name, _} -> name end)}
+      |> Map.merge(context_globals(metas))
 
     env = %{globals: globals, callbacks: %{request: request_callback}}
 
@@ -238,19 +296,45 @@ defmodule OapiCodemode.Tools do
     %Jason.OrderedObject{values: [{"calls", call_log}, {"logs", logs}, {key, value}]}
   end
 
-  defp dispatch(registry, entries, api_name, req_opts, ctx) do
-    with {:ok, entry} <- Registry.lookup(registry, api_name),
+  defp dispatch(registry, metas, api_name, req_opts, ctx) do
+    names = Enum.map(metas, fn {n, _} -> n end)
+
+    with :ok <- permit(registry, names, api_name),
+         {:ok, entry} <- Registry.lookup(registry, api_name),
          {:ok, resp} <- Proxy.request(entry, api_name, req_opts, ctx) do
       {%{"status" => resp.status, "headers" => resp.headers, "body" => resp.body}, resp.status}
     else
       {:error, :unknown_api} ->
-        known = Enum.map_join(entries, ", ", fn {n, _} -> n end)
-        {%{"error" => "unknown API #{inspect(api_name)}. Registered: #{known}"}, :error}
+        {%{"error" => "unknown API #{inspect(api_name)}. Registered: #{name_list(names)}"},
+         :error}
+
+      {:error, :not_permitted} ->
+        {%{
+           "error" =>
+             "API #{inspect(api_name)} is not permitted for this call. " <>
+               "Permitted: #{name_list(names)}"
+         }, :error}
 
       {:error, %{phase: phase, message: message}} ->
         {%{"error" => "[#{phase}] #{message}"}, :error}
     end
   end
+
+  # Design §5 step 3: the allowlist guarantee is enforced here, at the
+  # dispatch boundary — the globals filtering above only keeps the model
+  # from being shown APIs it cannot call. Registered-but-disallowed and
+  # unknown are distinct errors: the first is a policy the model must live
+  # with, the second a typo it can fix.
+  defp permit(registry, names, api_name) do
+    cond do
+      api_name in names -> :ok
+      match?({:ok, _}, Registry.lookup(registry, api_name)) -> {:error, :not_permitted}
+      true -> {:error, :unknown_api}
+    end
+  end
+
+  defp name_list([]), do: "(none)"
+  defp name_list(names), do: Enum.join(names, ", ")
 
   # I1: the executor is expected to cancel outstanding callback work when a
   # run times out (the Deno executor kills the subprocess), but Elixir-side
@@ -328,10 +412,10 @@ defmodule OapiCodemode.Tools do
     method <> " " <> path
   end
 
-  defp context_globals(entries) do
+  defp context_globals(metas) do
     contexts =
-      for {name, entry} <- entries, map_size(entry.config.sandbox_globals) > 0, into: %{} do
-        {name, entry.config.sandbox_globals}
+      for {name, meta} <- metas, map_size(meta.sandbox_globals) > 0, into: %{} do
+        {name, meta.sandbox_globals}
       end
 
     if map_size(contexts) > 0, do: %{"context" => contexts}, else: %{}

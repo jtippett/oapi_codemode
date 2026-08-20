@@ -25,7 +25,7 @@ credentials are attached host-side, after the JS has finished running.
 ```elixir
 def deps do
   [
-    {:oapi_codemode, "~> 0.1.0"},
+    {:oapi_codemode, "~> 0.3.2"},
     # plus the engine for your chosen executor — for the recommended
     # Executor.SafeJS (QuickJS-NG NIF, precompiled binaries):
     {:ex_safejs, "~> 0.3.1"}

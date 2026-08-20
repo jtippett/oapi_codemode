@@ -65,6 +65,10 @@ defmodule OapiCodemode.Executor.SafeJS do
 
   @behaviour OapiCodemode.Executor
 
+  # ex_safejs is an optional dep: consumers who never select this executor
+  # compile without it, and these remote calls must not warn there.
+  @compile {:no_warn_undefined, ExSafejs}
+
   require Logger
 
   @load_fn "__oapi_load_globals"

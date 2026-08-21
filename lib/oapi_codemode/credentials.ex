@@ -2,10 +2,19 @@ defmodule OapiCodemode.Credentials do
   @moduledoc """
   Host-implemented credential resolution, library-implemented attachment.
 
-  The host resolves *what* to attach (per request — so token refresh is the
-  host's problem and stale tokens self-heal on the next call). The spec's
-  securityScheme dictates *how* it is attached. Credential values never
-  enter the sandbox or the transcript.
+  The host resolves *what* to attach, per request; the spec's securityScheme
+  dictates *how* it is attached. Credential values never enter the sandbox or
+  the transcript.
+
+  Refresh has two modes, and a host can use either or both:
+
+    * **Proactive** — `resolve/4` runs on every request, so a host that knows
+      a token's expiry refreshes inside `resolve/4` before handing it back.
+    * **Reactive** — `unauthorized/4` (optional) is called when the upstream
+      answers 401 to a credential `resolve/4` supplied: for revoked tokens,
+      server-side session resets, and the many APIs whose `expires_in` cannot
+      be trusted. Returning `{:retry, credential}` re-sends the identical
+      request once with the new credential.
   """
 
   @type credential ::
@@ -46,6 +55,27 @@ defmodule OapiCodemode.Credentials do
               request :: request_info(),
               context :: map()
             ) :: {:ok, credential()} | {:error, term()}
+
+  @doc """
+  Called once when the upstream answers 401 after a credential from `resolve/4`
+  was attached. Return `{:retry, credential}` to have the library re-attach the
+  new credential and re-send the same request exactly once; return `:pass` to
+  hand the 401 back unchanged. Same error contract as resolve/4: a binary
+  `{:error, msg}` crosses verbatim; any non-binary reason is logged and
+  replaced with a fixed string. If this callback raises/exits/returns garbage,
+  the ORIGINAL 401 response is returned (never converted into a transport error).
+  """
+  # The credential that FAILED is deliberately not an argument: it would put a
+  # live secret into every host's refresh code (and its logs) for no gain — the
+  # host resolved it and can look it up itself from api_name + context.
+  @callback unauthorized(
+              api_name :: String.t(),
+              scheme :: map() | nil,
+              request :: request_info(),
+              context :: map()
+            ) :: {:retry, credential()} | :pass | {:error, term()}
+
+  @optional_callbacks unauthorized: 4
 
   # RFC 7230 token charset — what's legal in an HTTP header field name.
   @header_token_re ~r/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/
@@ -140,7 +170,13 @@ defmodule OapiCodemode.Credentials do
   defp do_attach(%{"type" => "apiKey", "in" => "cookie", "name" => name}, {:api_key, value}),
     do: {:ok, %{headers: [{"cookie", "#{name}=#{value}"}], query: %{}}}
 
-  defp do_attach(scheme, credential) when is_tuple(credential) and tuple_size(credential) > 0 do
+  # Only an ATOM first element is a shape *tag* worth naming. A resolver that
+  # returns the value first ({"tok-...", :oops}) would otherwise interpolate a
+  # live secret into a binary message that crosses to the sandbox verbatim —
+  # those fall through to the fixed @shape_error below.
+  defp do_attach(scheme, credential)
+       when is_tuple(credential) and tuple_size(credential) > 0 and
+              is_atom(elem(credential, 0)) do
     {:error,
      "credential shape #{credential |> elem(0) |> to_string()} does not fit security scheme " <>
        inspect(Map.take(scheme || %{}, ["type", "scheme", "in", "name"]))}

@@ -10,6 +10,10 @@ defmodule OapiCodemode.Proxy do
   Error messages crossing back to the sandbox are fixed strings wherever the
   underlying detail could embed a credential (transport failures, resolver
   reasons). The detail goes to `Logger` instead.
+
+  A 401 from the upstream gets one reactive refresh: if the host's resolver
+  implements `c:OapiCodemode.Credentials.unauthorized/4`, the identical
+  request is re-sent once with whatever credential it hands back.
   """
 
   require Logger
@@ -54,9 +58,14 @@ defmodule OapiCodemode.Proxy do
       {:ok, op, path_params} ->
         meta = %{meta | operation: op.id}
 
-        case after_match(entry, api_name, op, path_params, query, body, opts, ctx) do
-          {:ok, resp} ->
-            emit(start, [:oapi_codemode, :request, :stop], Map.put(meta, :status, resp.status))
+        case after_match(entry, api_name, op, path_params, query, body, opts, ctx, meta) do
+          {:ok, resp, retried?} ->
+            emit(
+              start,
+              [:oapi_codemode, :request, :stop],
+              meta |> Map.put(:status, resp.status) |> Map.put(:retried, retried?)
+            )
+
             {:ok, resp}
 
           {:error, err} ->
@@ -66,14 +75,27 @@ defmodule OapiCodemode.Proxy do
     end
   end
 
-  defp after_match(entry, api_name, op, path_params, query, body, opts, ctx) do
+  defp after_match(entry, api_name, op, path_params, query, body, opts, ctx, meta) do
     with :ok <- policy(ctx.policy, op.method),
          {:ok, extra_headers} <- passthrough_headers(entry.config, opts),
          :ok <- validate(entry.config, op, query, body, path_params),
-         {:ok, auth} <- credentials(entry, api_name, op, ctx),
+         {:ok, auth, cred} <- credentials(entry, api_name, op, ctx),
          :ok <- reserved_query(query, auth),
          :ok <- reserved_auth_headers(extra_headers, auth) do
-      execute(entry.config, op, path_params, query, body, auth, extra_headers, opts, ctx)
+      call = %{
+        config: entry.config,
+        op: op,
+        path_params: path_params,
+        query: query,
+        body: body,
+        opts: opts,
+        extra_headers: extra_headers,
+        # api_name + scheme + request_info, kept for a reactive refresh on 401.
+        cred: cred,
+        meta: meta
+      }
+
+      execute(call, auth, ctx)
     end
   end
 
@@ -228,7 +250,15 @@ defmodule OapiCodemode.Proxy do
 
     with {:ok, credential} <- ctx.resolver.resolve(api_name, scheme, request, ctx.context),
          {:ok, auth} <- Credentials.attach(scheme, credential) do
-      {:ok, auth}
+      # `supplied?` is a boolean, never the credential: a 401 only means
+      # "stale credential" if one was actually attached.
+      {:ok, auth,
+       %{
+         api_name: api_name,
+         scheme: scheme,
+         request: request,
+         supplied?: credential != :none
+       }}
     else
       {:error, message} when is_binary(message) ->
         {:error, %{phase: :credentials, message: message}}
@@ -278,51 +308,192 @@ defmodule OapiCodemode.Proxy do
     end
   end
 
-  defp execute(config, op, path_params, query, body, auth, extra_headers, opts, ctx) do
-    with {:ok, query_string} <- build_query_string(op, query, auth),
-         {:ok, req_body, content_type} <- encode_body(body, opts) do
-      url = build_url(config.base_url, op, path_params)
-      full_url = if query_string == "", do: url, else: url <> "?" <> query_string
+  defp execute(call, auth, ctx) do
+    with {:ok, query_string} <- build_query_string(call.op, call.query, auth),
+         {:ok, req_body, content_type} <- encode_body(call.body, call.opts) do
+      # Everything the wire request is made of EXCEPT the credential — a
+      # refresh re-sends this plan byte-for-byte with new auth headers/query
+      # (same body, same passthrough headers, so the auto idempotency key the
+      # tool layer generated for attempt 1 is reused unchanged).
+      plan = %{
+        method: http_method(call.op.method),
+        url: build_url(call.config.base_url, call.op, call.path_params),
+        body: req_body,
+        content_type: content_type,
+        extra_headers: call.extra_headers,
+        req_options: merge_req_options(call.config.req_options, ctx.req_options)
+      }
 
-      headers =
-        auth.headers ++
-          if(content_type, do: [{"content-type", content_type}], else: []) ++ extra_headers
+      case send_attempt(plan, auth, query_string) do
+        {:ok, %{status: 401} = resp} ->
+          unauthorized(resp, call, plan, ctx)
 
-      req =
-        Req.new(
-          [
-            method: http_method(op.method),
-            url: full_url,
-            headers: headers,
-            body: req_body,
-            retry: false,
-            max_retries: 0,
-            # I5: a 3xx comes back as data. Following it would re-send the
-            # Authorization header to a host the *upstream* chose. A host
-            # that wants redirects can pass `redirect: true` in req_options,
-            # which is appended after this default and wins.
-            redirect: false
-          ] ++ merge_req_options(config.req_options, ctx.req_options)
-        )
-
-      case Req.request(req) do
         {:ok, resp} ->
-          {:ok,
-           %{
-             status: resp.status,
-             headers: whitelist_headers(resp.headers, config),
-             body: cap_body(resp.body, config.max_response_bytes)
-           }}
+          {:ok, normalize(resp, call.config), false}
 
-        # C1(a): Mint's invalid-header errors quote the offending header
-        # VALUE — i.e. the credential — in their message. Nothing but the
-        # exception's module name may cross back.
         {:error, err} ->
-          Logger.error("oapi_codemode upstream request failed: #{inspect(err)}")
-
-          {:error, %{phase: :transport, message: "upstream request failed (#{error_name(err)})"}}
+          transport_error(err)
       end
     end
+  end
+
+  defp send_attempt(plan, auth, query_string) do
+    full_url = if query_string == "", do: plan.url, else: plan.url <> "?" <> query_string
+
+    headers =
+      auth.headers ++
+        if(plan.content_type, do: [{"content-type", plan.content_type}], else: []) ++
+        plan.extra_headers
+
+    req =
+      Req.new(
+        [
+          method: plan.method,
+          url: full_url,
+          headers: headers,
+          body: plan.body,
+          retry: false,
+          max_retries: 0,
+          # I5: a 3xx comes back as data. Following it would re-send the
+          # Authorization header to a host the *upstream* chose. A host
+          # that wants redirects can pass `redirect: true` in req_options,
+          # which is appended after this default and wins.
+          redirect: false
+        ] ++ plan.req_options
+      )
+
+    Req.request(req)
+  end
+
+  defp normalize(resp, config) do
+    %{
+      status: resp.status,
+      headers: whitelist_headers(resp.headers, config),
+      body: cap_body(resp.body, config.max_response_bytes)
+    }
+  end
+
+  # C1(a): Mint's invalid-header errors quote the offending header VALUE —
+  # i.e. the credential — in their message. Nothing but the exception's
+  # module name may cross back.
+  defp transport_error(err) do
+    Logger.error("oapi_codemode upstream request failed: #{inspect(err)}")
+    {:error, %{phase: :transport, message: "upstream request failed (#{error_name(err)})"}}
+  end
+
+  # Reactive credential refresh. Only 401 (403 is an authorization decision, not
+  # a stale credential — retrying it just burns a second call), only once, and
+  # only if the host implements the optional callback. Any misbehaviour of that
+  # callback degrades to the ORIGINAL 401: an upstream answer the model can
+  # reason about beats a synthesized transport error.
+  defp unauthorized(resp, call, plan, ctx) do
+    case refresh(call.cred, ctx) do
+      # :none — no callback; :pass — the host declined; :failed — the callback
+      # misbehaved (already logged).
+      keep when keep in [:none, :pass, :failed] ->
+        {:ok, normalize(resp, call.config), false}
+
+      {:retry, credential} ->
+        retry_once(resp, call, plan, credential)
+
+      {:error, message} when is_binary(message) ->
+        {:error, %{phase: :credentials, message: message}}
+
+      # Same contract as resolve/4's C1(b): a free-form reason routinely
+      # embeds the token it failed on. Log it, return a fixed string.
+      {:error, reason} ->
+        Logger.error(
+          "oapi_codemode credential refresh failed for #{inspect(call.cred.api_name)}: " <>
+            inspect(reason)
+        )
+
+        {:error, %{phase: :credentials, message: "credential refresh failed"}}
+    end
+  end
+
+  defp retry_once(resp, call, plan, credential) do
+    with {:ok, auth} <- Credentials.attach(call.cred.scheme, credential),
+         {:ok, query_string} <- build_query_string(call.op, call.query, auth) do
+      # The scheme decides which header/query names auth occupies, and the
+      # scheme hasn't changed — the reserved-name checks from attempt 1 still
+      # hold, so nothing but the values differs.
+      :telemetry.execute(
+        [:oapi_codemode, :request, :retry],
+        %{},
+        Map.put(call.meta, :status, 401)
+      )
+
+      case send_attempt(plan, auth, query_string) do
+        {:ok, resp2} -> {:ok, normalize(resp2, call.config), true}
+        {:error, err} -> transport_error(err)
+      end
+    else
+      # attach/2 messages never echo the credential; a query-encode failure
+      # here can only come from the scheme's own param name.
+      {:error, reason} ->
+        Logger.error(
+          "oapi_codemode refreshed credential could not be attached for " <>
+            "#{inspect(call.cred.api_name)}: #{inspect(reason)}"
+        )
+
+        {:ok, normalize(resp, call.config), false}
+    end
+  end
+
+  # No credential was attached, so a 401 says nothing about credential
+  # freshness — it's the upstream refusing an anonymous request. Refreshing
+  # here would turn a call the resolver deliberately left unauthenticated into
+  # an authenticated one.
+  defp refresh(%{supplied?: false}, _ctx), do: :none
+
+  defp refresh(cred, ctx) do
+    resolver = ctx.resolver
+
+    if Code.ensure_loaded?(resolver) and function_exported?(resolver, :unauthorized, 4) do
+      call_refresh(resolver, cred, ctx)
+    else
+      :none
+    end
+  end
+
+  defp call_refresh(resolver, cred, ctx) do
+    case resolver.unauthorized(cred.api_name, cred.scheme, cred.request, ctx.context) do
+      {:retry, credential} ->
+        {:retry, credential}
+
+      :pass ->
+        :pass
+
+      {:error, reason} ->
+        {:error, reason}
+
+      # Never inspect the value: an unexpected return from a credential
+      # callback is exactly the shape most likely to be holding a raw secret.
+      _other ->
+        Logger.error(
+          "oapi_codemode credential refresh for #{inspect(cred.api_name)} gave an " <>
+            "unexpected return; passing the 401 through"
+        )
+
+        :failed
+    end
+  rescue
+    # Only the exception's module name — its message may quote a credential.
+    e ->
+      Logger.error(
+        "oapi_codemode credential refresh for #{inspect(cred.api_name)} raised " <>
+          "#{inspect(e.__struct__)}; passing the 401 through"
+      )
+
+      :failed
+  catch
+    kind, _reason ->
+      Logger.error(
+        "oapi_codemode credential refresh for #{inspect(cred.api_name)} ended with " <>
+          "#{kind}; passing the 401 through"
+      )
+
+      :failed
   end
 
   # I1: Req entry-merges `:headers` across a single options list (it's split

@@ -129,6 +129,22 @@ defmodule OapiCodemode.CredentialsTest do
     assert msg =~ "credential must be"
   end
 
+  # The shape-mismatch message names the credential's tag — which is only a
+  # tag if it's an atom. A resolver that returns the *value* first
+  # ({"tok-...", :oops}) would otherwise interpolate the secret into a binary
+  # error message that crosses to the sandbox verbatim.
+  test "a mismatched credential whose first element is not an atom never echoes it" do
+    assert {:error, msg} = Credentials.attach(@bearer_scheme, {"tok-secret", :oops})
+    refute msg =~ "tok-secret"
+    assert msg == "credential must be {:bearer, _}, {:basic, _, _}, {:api_key, _}, or :none"
+  end
+
+  test "a mismatched credential with an atom tag still names the shape" do
+    assert {:error, msg} = Credentials.attach(@bearer_scheme, {:api_key, "v"})
+    assert msg =~ "api_key"
+    assert msg =~ "does not fit security scheme"
+  end
+
   # M8: an apiKey header name that isn't a valid HTTP token must be rejected,
   # and the (potentially malicious, multiline) name must never be echoed
   # back verbatim in the error message.

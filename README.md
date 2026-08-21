@@ -25,7 +25,7 @@ credentials are attached host-side, after the JS has finished running.
 ```elixir
 def deps do
   [
-    {:oapi_codemode, "~> 0.3.2"},
+    {:oapi_codemode, "~> 0.4.0"},
     # plus the engine for your chosen executor — for the recommended
     # Executor.SafeJS (QuickJS-NG NIF, precompiled binaries):
     {:ex_safejs, "~> 0.3.1"}
@@ -161,6 +161,53 @@ the sandbox/model *verbatim* — never put a credential or other secret in
 that string. Return any non-binary reason (`{:error, {:expired, token}}`,
 `{:error, :not_found}`, ...) and the library logs it in full via `Logger`
 but replaces it with a fixed, redacted string before it reaches the model.
+
+### Refreshing a token
+
+`resolve/4` runs on *every* request, so a host that tracks expiry just
+refreshes there — proactively, before the call goes out. For the cases
+expiry can't predict (revoked tokens, server-side session resets, an
+`expires_in` you don't trust), implement the optional `unauthorized/4`
+callback: the library calls it once when the upstream answers 401 to a
+credential you supplied.
+
+```elixir
+@impl true
+def unauthorized("petstore", _security_scheme, _request, %{user_id: user_id}) do
+  case MyApp.Tokens.refresh(user_id, :petstore) do
+    {:ok, token} -> {:retry, {:bearer, token}}
+    :error -> :pass
+  end
+end
+```
+
+`{:retry, credential}` re-sends the identical request exactly once with the
+new credential attached — same method, URL, body bytes and idempotency key —
+and returns whatever comes back, even another 401. `:pass` hands the 401
+straight through. The same error contract as `resolve/4` applies. The
+credential that *failed* is deliberately not passed to the callback: you
+resolved it, so you can look it up, and the library won't put a live secret
+into your refresh path. If the callback raises or returns something
+unexpected, the original 401 is returned and the problem is logged. A 401 on
+a request where `resolve/4` returned `:none` is never refreshed — no
+credential was attached, so the 401 isn't about credential staleness.
+
+## Telemetry
+
+- `[:oapi_codemode, :request, :start]` — measurements `%{}`, metadata
+  `%{api, operation, method}` (`operation` is `nil` until the request is
+  matched).
+- `[:oapi_codemode, :request, :stop]` — measurements `%{duration}`, metadata
+  `%{api, operation, method, status, retried}`. `retried` says whether the
+  response came from a credential-refresh retry.
+- `[:oapi_codemode, :request, :retry]` — measurements `%{}`, metadata
+  `%{api, operation, method, status: 401}`, emitted just before a refreshed
+  credential is re-sent.
+- `[:oapi_codemode, :request, :error]` — measurements `%{duration}`, metadata
+  `%{api, operation, method, error}`, where `error` is the failing phase
+  (`:match`, `:policy`, `:validate`, `:credentials`, `:transport`).
+
+No metadata field ever carries a credential.
 
 ## Registration options
 

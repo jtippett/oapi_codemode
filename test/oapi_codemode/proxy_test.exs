@@ -308,7 +308,7 @@ defmodule OapiCodemode.ProxyTest do
       )
 
     assert_receive {[:oapi_codemode, :request, :stop], ^ref, %{duration: _},
-                    %{api: "petstore", operation: "listPets", status: 200}}
+                    %{api: "petstore", operation: "listPets", status: 200, retried: false}}
   end
 
   describe "custom-operation pipeline wiring (I3, I5, M9)" do

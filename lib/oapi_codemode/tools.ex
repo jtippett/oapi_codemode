@@ -17,11 +17,14 @@ defmodule OapiCodemode.Tools do
       compute-only (ele P1; see `Executor.SafeJS`)
     * `:timeout` — sandbox timeout ms, default 30_000
     * `:executor_opts` — extra keyword opts forwarded verbatim to the
-      executor's `run/3` (e.g. `[limits: %{max_memory: 256_000_000}]` for
-      `Executor.ZapCode` — spec globals cost well over their JSON size in
-      the value-typed VM, so search over multi-MB specs needs more than
-      zapcode's 64MB default). `:timeout` above is merged in unless already
-      present here.
+      executor's `run/3`. For `Executor.SafeJS`:
+      `[memory_limit: 128 * 1024 * 1024, wall_clock_ms: 60_000]` — the
+      hard memory cap and the wall-clock ceiling its compute-only
+      `:timeout` does not provide. For `Executor.ZapCode`:
+      `[limits: %{max_memory: 256_000_000}]` — spec globals cost well over
+      their JSON size in the value-typed VM, so search over multi-MB specs
+      needs more than zapcode's 64MB default. `:timeout` above is merged in
+      unless already present here.
     * `:search_tool_name` — default "search_apis". Set a distinct name when a
       host emits per-API-instance tools.
     * `:execute_tool_name` — default "execute_api_code". A host that wants a
@@ -227,8 +230,9 @@ defmodule OapiCodemode.Tools do
     # I1: unlinked, so a late Agent crash can't propagate into the host's
     # caller process, and stopped in an `after` so no execute path — raise,
     # error, timeout — can leak it. State is {reserved_count, entries}:
-    # slots are reserved before dispatch so concurrent callbacks (Deno runs
-    # them in Tasks) cannot race past :max_calls.
+    # slots are reserved before dispatch so concurrent callbacks (an
+    # executor that dispatches them in parallel Tasks, as Deno does)
+    # cannot race past :max_calls.
     {:ok, calls} = Agent.start(fn -> {0, []} end)
 
     try do
@@ -560,10 +564,11 @@ defmodule OapiCodemode.Tools do
   end
 
   # Turns any shape an Executor may return for {:error, reason} into a
-  # uniform {message, logs} pair. `%{message: _, logs: _}` is what
-  # Deno.ex sends for an in-sandbox crash (the bootstrap's "done" message
-  # with an error still carries whatever console.log output happened
-  # before the crash) — those logs must reach the caller, not be dropped.
+  # uniform {message, logs} pair. `%{message: _, logs: _}` is what the
+  # executors send for an in-sandbox crash (SafeJS returns the console
+  # output it captured host-side; Deno's bootstrap "done" line carries
+  # whatever was logged before the crash) — those logs must reach the
+  # caller, not be dropped.
   defp normalize_error({:timeout, ms}), do: {"sandbox timed out after #{ms} ms", []}
 
   defp normalize_error({:wall_clock, ms}),

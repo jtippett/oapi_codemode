@@ -10,7 +10,7 @@ exploration; verify module names against the live code.
 
 Whenever this integration surfaces friction with the library, append an entry
 to `FEEDBACK.md` in the library repo (`~/Desktop/elixir/general_api_client`)
-as you go. That log drives the pre-hex-release pass.
+as you go. That log drives the library's release passes.
 
 ## Why gentility is the interesting host
 
@@ -65,9 +65,11 @@ FEEDBACK.md either way.
 
 ## Steps
 
-### 1. Dep + per-loop registry infrastructure
+### 1. Deps + per-loop registry infrastructure
 
-Add the git dep. At `LoopServer` start (in `handle_continue`, not `init`):
+Add `{:oapi_codemode, "~> 0.4.0"}` and `{:ex_safejs, "~> 0.3.1"}` — the
+latter is the optional engine dep for `Executor.SafeJS`, the recommended
+executor (step 4). At `LoopServer` start (in `handle_continue`, not `init`):
 collect the looper's bound integrations whose resource is an openapi adapter
 config. For each eligible one, start an unnamed single-spec
 `OapiCodemode.Registry` linked to the LoopServer, and register its cached
@@ -98,11 +100,22 @@ per request, not just at registration time. Per call, the resolver:
 4. Maps the credential's `auth_type` to `{:bearer, _}` / `{:api_key, _}` /
    `{:basic, _, _}`.
 
+Also implement the optional `unauthorized/4` callback for the OAuth
+integrations: `resolve/4` refreshes proactively when gentility knows an
+expiry, but OAuth tokens get revoked and `expires_in` values lie. On an
+upstream 401 the library calls `unauthorized(api_name, scheme, request,
+context)` once; return `{:retry, {:bearer, fresh_token}}` and the identical
+request (same body bytes, same idempotency key) is re-sent once, or `:pass`
+to hand the 401 back unchanged. The credential that failed is deliberately
+not an argument — the resolver minted it and can look it up, and the
+library will not put a live secret into the refresh path.
+
 Keep gentility's secrets-by-name discipline throughout: the resolver reads
 the store per request; nothing persists in loop state.
 
 Done when: resolver tests cover each auth kind, the no-longer-bound error,
-and the allowed-hosts rejection.
+the allowed-hosts rejection, and a 401 that refreshes and succeeds on the
+retry.
 
 ### 3. Wire the tools into the cloud loop
 
@@ -141,9 +154,13 @@ read-only on the `_api_execute` tool, so that half of the split is real at
 the wire today.
 
 Loop-policy hooks worth wiring now: the tool context's `net_access` /
-allowed-URL config should gate whether these tools are advertised at all
-(a per-call API allowlist inside the proxy is a known library deferral —
-until it lands, gate at advertisement time).
+allowed-URL config should gate whether these tools are advertised at all.
+The per-call API allowlist has since shipped as well — pass
+`api_allowlist: [names]` in the handler's `host_ctx` and the proxy refuses
+anything outside it at the dispatch boundary, with the sandbox globals
+filtered to match. Descriptions are built at emission time and are not
+allowlist-aware, so keep emitting per-scope definitions if a description
+must not name an API the caller cannot reach.
 
 Done when: a loop with one bound openapi integration (slug `x`) sees exactly
 three new tools — `x_api_search`, `x_api_execute`, `x_api_mutations` — with
@@ -152,24 +169,28 @@ sees none.
 
 ### 4. Deployment: nothing
 
-`Executor.SafeJS` (ex_safejs ≥ 0.3.0, QuickJS-NG as a Rustler NIF with
+`Executor.SafeJS` (ex_safejs ~> 0.3.1, QuickJS-NG as a Rustler NIF with
 precompiled binaries) is the recommended executor for untrusted
 model-written code: nothing to add to the prod image, a genuine hard
 memory cap (typed-array bombs that escape V8's heap limit under Deno come
-back as structured out-of-memory errors), and the same async-arrow dialect
-as Deno, so no prompt changes. It's an optional dep — add
-`{:ex_safejs, "~> 0.3.1"}` to gentility's mix.exs.
+back as structured out-of-memory errors), and it runs exactly the
+async-arrow dialect the emitted tool descriptions teach, so no prompt
+changes. It's an optional dep — add `{:ex_safejs, "~> 0.3.1"}` to
+gentility's mix.exs.
 
-One contract to know: SafeJS's `:timeout` is a JS *compute* budget that
-excludes host-callback time. A loop that meters runs (LoopServer
+Two contracts to know. SafeJS's `:timeout` is a JS *compute* budget that
+excludes host-callback time, so a loop that meters runs (LoopServer
 deadlines, billing) should pass
 `executor_opts: [wall_clock_ms: <hard ceiling>]`; the tools' default
-`:max_calls` (100 per run) already bounds call-count abuse either way.
+`:max_calls` (100 per run) already bounds call-count abuse either way. And
+the memory cap is a number you choose — `executor_opts: [memory_limit:
+128 * 1024 * 1024]` alongside it.
 
-`Executor.Deno` remains the alternative if a loop needs truly concurrent
-`Promise.all` (SafeJS runs requests serially); it needs the `deno` 2.x
-binary in the prod image. (Regex is NOT a Deno edge — SafeJS runs it fine;
-the old no-regex note was quicksand-era, disproven live 2026-08-20.)
+`Executor.Deno` is a footnote here: take it only if a loop needs truly
+concurrent `Promise.all` (SafeJS runs requests serially), and only at the
+cost of a `deno` 2.x binary in the prod image. (Regex is NOT a Deno edge —
+SafeJS runs it fine; the old no-regex note was quicksand-era, disproven
+live 2026-08-20.)
 
 Dev-server gotcha (hit by ele with Tidewave): Req's plug adapter hands the
 endpoint a conn whose `body_params`/`params` are already fetched — empty

@@ -2,7 +2,11 @@
 
 Append an entry whenever integrating this library into a host surfaces
 friction: a bug, a missing affordance, a contract that didn't fit, a doc that
-lied. Entries here drive the pre-hex-release pass.
+lied. Entries here drive the library's release passes.
+
+*Status note, 2026-08-21:* the library is on hex (0.4.0) — "pre-hex-release
+pass" above is now just "the next release". Every entry below is resolved;
+the log stays as the record of why the contracts look the way they do.
 
 Format per entry:
 

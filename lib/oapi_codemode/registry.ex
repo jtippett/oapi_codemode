@@ -33,11 +33,16 @@ defmodule OapiCodemode.Registry do
 
   `api_name` must be a valid JS identifier — it becomes a property name on
   the sandbox globals. Returns `{:error, {:invalid_api_name, name}}`
-  otherwise, or `{:error, :no_base_url}` when neither the config nor the
-  spec supplies a server URL.
+  otherwise, `{:error, {:invalid_idempotency_header, name}}` when
+  `auto_idempotency_header` is not a usable header name (empty, non-binary,
+  or one of the reserved names the library and credential layer own), or
+  `{:error, :no_base_url}` when neither the config nor the spec supplies a
+  server URL.
   """
   @spec register(GenServer.server(), String.t(), Artifact.t(), ApiConfig.t()) ::
-          :ok | {:error, {:invalid_api_name, term()} | :no_base_url}
+          :ok
+          | {:error,
+             {:invalid_api_name, term()} | {:invalid_idempotency_header, term()} | :no_base_url}
   def register(server, api_name, %Artifact{} = artifact, %ApiConfig{} = config) do
     cond do
       not (is_binary(api_name) and Regex.match?(@api_name_re, api_name)) ->

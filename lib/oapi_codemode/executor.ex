@@ -7,7 +7,11 @@ defmodule OapiCodemode.Executor do
   Requirements for real implementations:
     * No network access inside the sandbox.
     * `globals` are injected as JSON data before the code runs.
-    * `callbacks.request` may be invoked CONCURRENTLY (Promise.all).
+    * `callbacks.request` may be invoked CONCURRENTLY (a guest's
+      `Promise.all` under an engine that dispatches in parallel, as
+      `Executor.Deno` does) — the callback the tool layer supplies is
+      safe for that. Dispatching serially instead is allowed and is what
+      the in-process engines do.
     * The boundary is JSON-native: values crossing it survive
       JSON encode/decode unchanged.
     * On timeout, return `{:error, {:timeout, ms}}`, and cancel any
@@ -29,10 +33,14 @@ defmodule OapiCodemode.Executor do
   registered API names for this run (set by `OapiCodemode.Tools` in
   `do_execute/6`). This is not an ordinary data global: a real executor
   MUST read `globals["apiNames"]` and, before running the sandboxed code,
-  build one `apis.<name>.request(opts)` binding per name that forwards to
-  the `:request` callback as `rpc("request", [name, opts])` (see
-  `priv/deno/bootstrap.ts`'s `installGlobals/2` for the reference
-  implementation). Everything else in `globals` is injected as inert data;
+  build one `apis.<name>.request(opts)` binding per name, each forwarding
+  to the `:request` callback with that name as its first argument. How the
+  bindings are built is the engine's business: `OapiCodemode.Executor.SafeJS`
+  emits an `apis` object literal in a JS preamble evaluated ahead of the
+  guest code, and `priv/deno/bootstrap.ts`'s `installGlobals/2` builds the
+  same object over the port protocol's `rpc("request", [name, opts])`.
+  Either way the guest sees one shape. Everything else in `globals` is
+  injected as inert data;
   `apiNames` alone is a *build instruction* for the sandbox's `apis` object.
   A third-party executor that treats it as just another data global will
   silently omit `apis` entirely and every `execute_api_code` call will fail

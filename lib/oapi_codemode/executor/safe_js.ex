@@ -1,24 +1,33 @@
 defmodule OapiCodemode.Executor.SafeJS do
   @moduledoc """
-  In-process executor on [ex_safejs](https://github.com/jtippett/ex_safejs),
-  the QuickJS-NG engine embedded as a Rustler NIF (our hard fork of
-  lpgauth/quicksand). Like `Executor.ZapCode` it's a pure dependency with
-  precompiled binaries — no runtime binary in the image, no subprocess — but
-  unlike zapcode it enforces a genuine hard memory cap (QuickJS's own
-  allocator is the sole memory authority, so even typed-array/`ArrayBuffer`
-  allocations are bounded, the vector that escapes V8's heap limit) and runs
-  a mature, correct engine with O(1) container access (no O(n²) spec scans).
+  The recommended executor: in-process on
+  [ex_safejs](https://github.com/jtippett/ex_safejs), the QuickJS-NG engine
+  embedded as a Rustler NIF (our hard fork of lpgauth/quicksand). A hex
+  dependency with precompiled binaries is the whole deployment story — no
+  runtime binary in the image, no subprocess, no container config — and
+  QuickJS's own allocator is the sole memory authority, so a guest's live
+  memory is genuinely capped: typed-array/`ArrayBuffer` bombs, the vector
+  that escapes V8's heap limit, come back as a structured out-of-memory
+  error. The engine is complete and mature (regex included — global match,
+  named groups, lookaheads) with O(1) container access, so searching a
+  multi-MB spec as data is not pathological.
 
-  ## Dialect: same async arrow as `Executor.Deno`
+  The other executors are alternatives measured against this one:
+  `Executor.Deno` for truly concurrent `Promise.all` at the cost of a
+  `deno` binary in the image, `Executor.ZapCode` behind ex_zapcode (execute
+  only), `Executor.Mock` for tests.
+
+  ## Dialect: async arrow, serial requests
 
   Since ex_safejs 0.3.0 eval is async-aware, so guest code may be a sync or
-  an `async` arrow — `await`, `.then` chains, and `Promise.all` all work.
+  an `async` arrow — `await`, `.then` chains, and `Promise.all` all work,
+  which is the dialect `OapiCodemode.Tools.Descriptions` teaches the model.
   `apis.<name>.request(...)` blocks the JS thread while the Elixir callback
   runs and returns the response as a plain value, which `await` passes
   through unchanged; `Promise.all` over several requests therefore executes
-  them serially, not concurrently. A promise that nothing can ever settle
-  is reported as a deadlock error immediately instead of burning the
-  timeout.
+  them serially, not concurrently — correct results, wall time the sum
+  rather than the max. A promise that nothing can ever settle is reported
+  as a deadlock error immediately instead of burning the timeout.
 
   ## Timeout is compute-only — wall clock is a separate opt
 
@@ -31,14 +40,23 @@ defmodule OapiCodemode.Executor.SafeJS do
   throwaway worker killed at that deadline, returning
   `{:error, {:wall_clock, ms}}` (logs captured before the kill are lost).
   `OapiCodemode.Tools`' `:max_calls` bounds the same class at the tool
-  layer for every executor. `Executor.Deno`'s timeout, by contrast, is a
-  wall-clock deadline that includes callback time.
+  layer for every executor. (`Executor.Deno`'s timeout, by contrast, is a
+  wall-clock deadline that already includes callback time, so it needs no
+  second knob.)
 
-  Injection differs from Deno: ex_safejs has no globals API, so
-  `env.globals` is handed in through a host callback that returns the map
-  (direct term→JS conversion — faster than embedding JSON) and
-  `Object.assign`ed onto `globalThis` in a preamble. The `apis` object and a
-  `console.log` capture shim are built in the same preamble.
+  `:memory_limit` and `:max_stack_size` are passed through to
+  `ExSafejs.start/1` from the same opts, so a host can size the cap per
+  workload via `OapiCodemode.tools/1`'s `:executor_opts`.
+
+  ## Injection
+
+  ex_safejs has no globals API, so `env.globals` is handed in through a host
+  callback that returns the map (direct term→JS conversion — faster than
+  embedding JSON) and `Object.assign`ed onto `globalThis` in a preamble. The
+  `apis` object required by `OapiCodemode.Executor` is built in the same
+  preamble as an object literal, one entry per `globals["apiNames"]` name,
+  each closing over its own JSON-encoded name; a `console.log` capture shim
+  goes in alongside it.
 
   ## Isolation
 
@@ -48,19 +66,20 @@ defmodule OapiCodemode.Executor.SafeJS do
   trap_exit GenServer caller (gentility's LoopServer). The quicksand-era
   throwaway worker per eval is gone.
 
-  ## Divergences from `Executor.Deno`, inherent to the engine
+  ## Sharp edges
 
     * **Serial `Promise.all`** (above): requests resolve one at a time.
+      `Executor.Deno` is the option when a run's latency is dominated by
+      several independent calls.
     * **Raising callbacks are opaque to the guest AND the caller.** A
       callback that raises surfaces to JS as a generic
       `"host function failed"` exception; if uncaught, this run's
       `{:error, %{message: ..., logs: ...}}` carries a fixed redacted
       message — the real exception text goes to `Logger` only (C1:
       exception messages can embed paths, query fragments, credentials).
-
-  Regex works — global match, named groups, lookaheads (QuickJS-NG is a
-  complete engine). The old "no regex" note was a zapcode/quicksand-era
-  belief, disproven live 2026-08-20.
+    * **A wall-clock kill loses logs**: `:wall_clock_ms` (above) takes the
+      worker's captured `console.log` output with it; only the error shape
+      survives.
   """
 
   @behaviour OapiCodemode.Executor

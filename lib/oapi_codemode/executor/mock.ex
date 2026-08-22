@@ -5,7 +5,8 @@ defmodule OapiCodemode.Executor.Mock do
   a JS runtime.
 
   M7: this ships in `lib/`, not `test/support/`, on purpose — downstream
-  hosts need it to test their own tool wiring without installing Deno.
+  hosts need it to test their own tool wiring without standing up a JS
+  engine (hosts configure it as the executor for their whole test env).
   """
 
   @behaviour OapiCodemode.Executor

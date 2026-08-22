@@ -1,6 +1,14 @@
 defmodule OapiCodemode.Executor.Deno do
   @moduledoc """
-  Subprocess Deno executor. Resurrects ele's Exile-bridge design
+  Subprocess Deno executor — the alternative to the recommended
+  `OapiCodemode.Executor.SafeJS`, and the only one that dispatches a
+  guest's `Promise.all` requests *concurrently*. The costs against SafeJS:
+  a `deno` 2.x binary must be on `PATH` in every image that runs it, and
+  V8 has no hard memory cap (an `ArrayBuffer` bomb walks past
+  `--max-old-space-size`). Its `:timeout`, unlike SafeJS's, is a
+  wall-clock deadline that already includes host-callback time.
+
+  Resurrects ele's Exile-bridge design
   (ele-core a2a52478f) over a raw Port with three properties the original
   lacked: no temp files (data-URL import), concurrent callback dispatch,
   and child reaping on every path this module can reach — we record the

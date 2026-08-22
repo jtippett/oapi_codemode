@@ -1,13 +1,21 @@
 defmodule OapiCodemode.Executor.ZapCode do
   @moduledoc """
   In-process executor on [ex_zapcode](https://github.com/jtippett/ex_zapcode),
-  a pure-Rust TypeScript-subset interpreter shipped as a NIF. No subprocess,
-  no runtime binary in the image, no container config — a hex dependency is
-  the whole deployment story, and the engine enforces a hard cap on live
-  guest memory (the blocker that ruled Deno out for some hosts).
+  a pure-Rust TypeScript-subset interpreter shipped as a NIF. Like
+  `OapiCodemode.Executor.SafeJS` it deploys as nothing but a hex dependency
+  — no subprocess, no runtime binary in the image, no container config —
+  and bounds live guest memory (`limits: %{max_memory: bytes}`).
+
+  **`Executor.SafeJS` is the recommended executor and this one is not a
+  drop-in equal**: search over real specs is engine-blocked here (container
+  copy semantics make scans O(n²)), the TypeScript subset is partial (no
+  regex, see below), and only execute is exercised end to end. Reach for it
+  when zapcode's interpreter is wanted for its own reasons; otherwise use
+  SafeJS.
 
   The engine has no host bindings at all (no filesystem/network/env), so
-  the `:request` callback is the sandbox's only door out, same as Deno.
+  the `:request` callback is the sandbox's only door out, same as every
+  other executor.
   Guest code suspends at each `apis.<name>.request(...)` call
   (zapcode's start/resume model), the callback runs in Elixir, and the run
   resumes with its return value. The `apis` object itself is built by a JS
@@ -19,12 +27,13 @@ defmodule OapiCodemode.Executor.ZapCode do
   with a pending builtin call (Promise.all) on the operand stack — both
   found integrating this module, both covered by regression tests here.
 
-  Known divergences from `OapiCodemode.Executor.Deno`, all inherent to the
-  engine rather than this module:
+  Known divergences from `OapiCodemode.Executor.SafeJS`, all inherent to
+  the engine rather than this module (SafeJS shares only the first):
 
     * **Callbacks are serial.** `Promise.all` over api calls works but
       resolves one call at a time (accepted zapcode constraint):
-      wall-clock for N calls is the sum, not the max.
+      wall-clock for N calls is the sum, not the max. Same as SafeJS;
+      `Executor.Deno` is the one that dispatches concurrently.
     * **Callback errors abort the run.** `resume` can only inject a return
       value, not a throwable, so a raising callback comes back to the model
       as this run's `{:error, %{message: ..., logs: ...}}` instead of a JS
@@ -34,7 +43,9 @@ defmodule OapiCodemode.Executor.ZapCode do
       `console.log` output after the first API call, or in a failing
       segment, is dropped. Output before the first suspension is captured.
     * **No regex.** Regex literals are rejected at parse time; guest code
-      must filter with `.includes()`/`.startsWith()`/`.endsWith()`.
+      must filter with `.includes()`/`.startsWith()`/`.endsWith()`. (This
+      is true here and only here — SafeJS runs regex fine, and the emitted
+      tool descriptions do not teach the restriction.)
 
   Timeout is a wall-clock deadline enforced at every suspension point, and
   the engine's own `max_duration_secs` (set to the same `:timeout`) bounds

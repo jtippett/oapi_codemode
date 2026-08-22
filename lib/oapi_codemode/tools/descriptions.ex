@@ -8,7 +8,7 @@ defmodule OapiCodemode.Tools.Descriptions do
 
   @max_tags 40
 
-  @doc "Description for the `search_apis` tool, given `Registry.list/1` output."
+  @doc "Description for the `search_apis` tool, given `OapiCodemode.Registry.list/1` output."
   @spec search([{String.t(), struct()}]) :: String.t()
   def search(entries) do
     """
@@ -60,7 +60,7 @@ defmodule OapiCodemode.Tools.Descriptions do
   end
 
   @doc """
-  Description for the execute tool, given `Registry.list/1` output.
+  Description for the execute tool, given `OapiCodemode.Registry.list/1` output.
 
   `policy` is `:read_only` (default) or `:all`. Under `:all` an extra
   paragraph is appended stating that mutating requests are allowed — a host
